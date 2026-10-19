@@ -1,0 +1,18 @@
+# PostgreSQL để chạy thử nhanh:  docker compose up -d
+# Sau đó đặt DATABASE_URL=postgres://xiangqi:xiangqi@localhost:5432/xiangqi rồi npm start
+# (server tự tạo bảng khi khởi động; hoặc chạy thủ công: npm run migrate)
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: xiangqi
+      POSTGRES_PASSWORD: xiangqi
+      POSTGRES_DB: xiangqi
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

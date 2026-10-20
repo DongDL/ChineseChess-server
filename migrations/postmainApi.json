@@ -1,0 +1,382 @@
+{
+  "info": {
+    "name": "ChineseChess Server API",
+    "description": "Bộ sưu tập các API HTTP của ChineseChess server (auth + lịch sử ván đấu). Game realtime chạy qua Socket.IO nên không có trong đây.\n\nBiến dùng chung:\n- baseUrl: địa chỉ server (mặc định http://localhost:3000)\n- token: Bearer token, tự động lưu sau khi Register/Login/OAuth Exchange thành công.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000",
+      "type": "string"
+    },
+    {
+      "key": "token",
+      "value": "",
+      "type": "string"
+    },
+    {
+      "key": "gameId",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "GET /health",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/health",
+              "host": ["{{baseUrl}}"],
+              "path": ["health"]
+            },
+            "description": "Kiểm tra server sống + thống kê nhanh của game server. Trả về { ok, ... }."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "GET /auth/providers",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/providers",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "providers"]
+            },
+            "description": "Danh sách nhà cung cấp OAuth đã cấu hình. Trả về { ok, providers: ['google', ...] }."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /auth/register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res && res.ok && res.token) {",
+                  "  pm.collectionVariables.set('token', res.token);",
+                  "  console.log('Đã lưu token từ register');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"player1\",\n  \"password\": \"password123\",\n  \"displayName\": \"Player One\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/register",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "register"]
+            },
+            "description": "Đăng ký tài khoản mới. username: 3-20 ký tự [a-z0-9_]; password: 8-128 ký tự; displayName (tùy chọn): 2-24 ký tự.\n\nTrả về { ok, token, user }. Token được tự động lưu vào biến {{token}}."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /auth/login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res && res.ok && res.token) {",
+                  "  pm.collectionVariables.set('token', res.token);",
+                  "  console.log('Đã lưu token từ login');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"username\": \"player1\",\n  \"password\": \"password123\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "login"]
+            },
+            "description": "Đăng nhập bằng tên đăng nhập + mật khẩu. Trả về { ok, token, user }. Token được tự động lưu vào biến {{token}}."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /auth/me",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/auth/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "me"]
+            },
+            "description": "Thông tin người dùng hiện tại (cần Bearer token). Trả về { ok, user: { ..., providers, hasPassword } }."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /auth/logout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res && res.ok) {",
+                  "  pm.collectionVariables.set('token', '');",
+                  "  console.log('Đã xóa token sau logout');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/auth/logout",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "logout"]
+            },
+            "description": "Đăng xuất (thu hồi token hiện tại, cần Bearer). Trả về { ok }."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "OAuth",
+      "item": [
+        {
+          "name": "POST /auth/oauth/:provider/start",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"appRedirect\": \"cotuong://auth\",\n  \"link\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/oauth/google/start",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "oauth", "google", "start"],
+              "variable": [
+                {
+                  "key": "provider",
+                  "value": "google",
+                  "description": "google | facebook | zalo"
+                }
+              ]
+            },
+            "description": "Bắt đầu luồng OAuth. appRedirect phải khớp OAUTH_APP_REDIRECTS. Nếu link=true thì cần Bearer token (liên kết vào tài khoản đang đăng nhập) - thêm header Authorization: Bearer {{token}}.\n\nTrả về { ok, url } - mở url này trên trình duyệt để đăng nhập với nhà cung cấp."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /auth/oauth/:provider/start (link - Bearer)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{token}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"appRedirect\": \"cotuong://auth\",\n  \"link\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/oauth/google/start",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "oauth", "google", "start"]
+            },
+            "description": "Biến thể liên kết tài khoản (link=true) - cần Bearer token của tài khoản hiện tại. Trả về { ok, url }."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /auth/oauth/:provider/callback",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/auth/oauth/google/callback?code=AUTH_CODE&state=STATE_VALUE",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "oauth", "google", "callback"],
+              "query": [
+                { "key": "code", "value": "AUTH_CODE" },
+                { "key": "state", "value": "STATE_VALUE" }
+              ]
+            },
+            "description": "Callback mà nhà cung cấp gọi về (thường không gọi thủ công). Trả về 302 chuyển về app kèm ?code=... hoặc ?error=..."
+          },
+          "response": []
+        },
+        {
+          "name": "POST /auth/oauth/exchange",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const res = pm.response.json();",
+                  "if (res && res.ok && res.token) {",
+                  "  pm.collectionVariables.set('token', res.token);",
+                  "  console.log('Đã lưu token từ oauth exchange');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"CODE_FROM_APP_REDIRECT\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/auth/oauth/exchange",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "oauth", "exchange"]
+            },
+            "description": "Đổi code (nhận được ở app sau callback) lấy token phiên. Trả về { ok, token, user }. Token được tự động lưu vào {{token}}."
+          },
+          "response": []
+        },
+        {
+          "name": "DELETE /auth/oauth/:provider (unlink)",
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/auth/oauth/google",
+              "host": ["{{baseUrl}}"],
+              "path": ["auth", "oauth", "google"]
+            },
+            "description": "Gỡ liên kết nhà cung cấp khỏi tài khoản hiện tại (cần Bearer). Trả về { ok }."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Me (lịch sử)",
+      "item": [
+        {
+          "name": "GET /me/games",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/me/games?limit=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["me", "games"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "20",
+                  "description": "1-50, mặc định 20"
+                },
+                {
+                  "key": "before",
+                  "value": "",
+                  "description": "endedAt (ms) để phân trang - để trống cho trang đầu",
+                  "disabled": true
+                }
+              ]
+            },
+            "description": "Lịch sử ván đấu của chính bạn (cần Bearer). Trả về { ok, games: [...], nextBefore }. Dùng nextBefore cho tham số before để lấy trang tiếp theo."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /me/stats",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/me/stats",
+              "host": ["{{baseUrl}}"],
+              "path": ["me", "stats"]
+            },
+            "description": "Thống kê ván đấu của bạn (cần Bearer). Trả về { ok, stats: { total, wins, losses, draws } }."
+          },
+          "response": []
+        },
+        {
+          "name": "GET /me/logins",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{token}}" }],
+            "url": {
+              "raw": "{{baseUrl}}/me/logins?limit=30",
+              "host": ["{{baseUrl}}"],
+              "path": ["me", "logins"],
+              "query": [
+                {
+                  "key": "limit",
+                  "value": "30",
+                  "description": "1-100, mặc định 30"
+                }
+              ]
+            },
+            "description": "Lịch sử đăng nhập của chính bạn (cần Bearer). Trả về { ok, events: [...] }."
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Games",
+      "item": [
+        {
+          "name": "GET /games/:id",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/games/{{gameId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["games", "{{gameId}}"],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": "{{gameId}}",
+                  "description": "UUID của ván đấu (36 ký tự)"
+                }
+              ]
+            },
+            "description": "Xem lại chi tiết một ván đấu theo id (UUID). Không cần đăng nhập - ai có id cũng xem được. Trả về { ok, game } kèm danh sách nước đi. Đặt biến {{gameId}} trước khi gọi."
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}

@@ -8,9 +8,9 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "migrate": "node scripts/migrate.js",
+    "start": "node --env-file=.env src/index.js",
+    "dev": "node --env-file=.env --watch src/index.js",
+    "migrate": "node --env-file=.env scripts/migrate.js",
     "test": "node --test",
     "demo": "node scripts/demo.js"
   },

@@ -41,6 +41,7 @@ Bộ test dùng một **máy chủ giả** của Google/Facebook/Zalo kiểm tra
 | `src/oauth.js`, `src/providers.js` | Đăng nhập Google / Facebook / Zalo (OAuth 2.0 + PKCE), liên kết, gỡ liên kết |
 | `src/stores/pg.js`, `src/stores/memory.js` | Lưu trữ PostgreSQL / bộ nhớ, **cùng một giao diện** và cùng bộ test hợp đồng |
 | `src/migrate.js`, `migrations/*.sql` | Tạo và nâng cấp schema. Thay đổi schema = thêm file `002_...sql`, **không sửa file cũ** |
+| `src/elo.js` | Công thức Elo, hệ số K, quy tắc ván tính điểm (hàm thuần) |
 | `src/recorder.js` | Ghi ván đã kết thúc vào CSDL ở nền, tự thử lại khi CSDL lỗi |
 | `src/auth-http.js`, `src/api-http.js`, `src/http-util.js` | Các đường dẫn HTTP `/auth/*`, `/me/*`, `/games/*` |
 | `test/` | `engine`, `clock`, `auth`, `store` (hợp đồng), `integration` (OAuth + ghi ván + API), `server` (Socket.IO) |
@@ -144,9 +145,36 @@ Sự kiện `game:over` và `state` có thêm `gameId` để xem lại.
 Lịch sử đăng nhập ghi: `register`, `login`, `login_failed`, `logout`, `link`, `link_failed`, `unlink`, kèm phương thức (`password`, `google`, `facebook`, `zalo`, `token`).
 Đăng nhập thất bại với tên không tồn tại được ghi nhưng không gắn với tài khoản nào và **không lưu tên đã gõ** (tránh lưu nhầm mật khẩu).
 
+## Xếp hạng Elo và bảng xếp hạng
+
+Mỗi tài khoản bắt đầu ở **1500** điểm. Điểm đổi sau mỗi **ván tính điểm**, trong **cùng transaction** với việc lưu ván (không bao giờ có ván đã lưu mà điểm chưa đổi), và lưu lại điểm trước/sau của từng ván.
+
+**Ván tính điểm** khi: cả hai bên đều là tài khoản (khách không có điểm), là hai tài khoản khác nhau, và ván có ít nhất `RATED_MIN_MOVES` = 6 nước (chặn "đầu hàng ngay" để cày điểm). Hết giờ, đầu hàng, mất kết nối tính là thua bình thường.
+**Hệ số K:** 40 cho 30 ván tính điểm đầu (điểm "tạm", API trả `provisional: true`), sau đó 20, từ 2400 trở lên 10. Điểm tối thiểu 100. Các hằng số nằm ở `src/elo.js`.
+
+| Lệnh | Mô tả |
+|---|---|
+| `GET /me/rating` | (Bearer) `{ rating: { rating, ratedGames, rank, provisional } }`; `rank` là `null` nếu chưa có ván tính điểm |
+| `GET /leaderboard?limit=50&offset=0` | Công khai. `{ players: [{ rank, displayName, avatarUrl, rating, ratedGames, provisional, isMe }], nextOffset }`. Có Bearer hợp lệ thì dòng của mình có `isMe: true`. **Không lộ id tài khoản.** Cùng điểm cùng hạng (1, 2, 2, 4) |
+| `/me/games`, `/games/:id` | Thêm `rated`, và `ratingChange { before, after, delta }` (góc nhìn của bạn) / `ratings { red, black }` |
+
+Sự kiện Socket.IO `game:rating` `{ roomId, gameId, rated, red: {before, after, delta}|null, black: ... }` được phát cho cả phòng **sau khi ván đã ghi vào CSDL**
+(ván không tính điểm vẫn gửi với `rated: false` để app thôi chờ). Nếu CSDL lỗi quá 3 lần thì không có sự kiện này; điểm vẫn xem được qua API khi ván được ghi lại.
+
+Ván chơi **trước** migration `002` không tính điểm. Muốn tính lại từ lịch sử (hoặc vá nếu nghi dữ liệu điểm lệch): `npm run ratings:rebuild`
+(chạy lại bao nhiêu lần cũng cho cùng kết quả; chặn ghi vào `users`/`games` trong vài giây).
+**Chưa chống:** hai người thông đồng thắng thua qua lại giữa hai tài khoản để "đẩy" điểm; cần thêm giới hạn theo cặp đối thủ nếu thành vấn đề thật.
+
+## Quản lý tài khoản
+
+| Lệnh | Mô tả |
+|---|---|
+| `POST /auth/password` | (Bearer) `{ currentPassword, newPassword }` -> `{ ok, revoked }`. Thu hồi **mọi phiên khác** (kẻ giữ token cũ bị đá ra); đoán sai mật khẩu cũ bị khoá tạm như đăng nhập. Tài khoản chỉ đăng nhập mạng xã hội: `no_password` |
+| `POST /auth/account/delete` | (Bearer) `{ password }` (hoặc `{ confirm: "DELETE" }` với tài khoản chỉ đăng nhập mạng xã hội; chỉ chặn bấm nhầm, không phải xác thực). Xoá vĩnh viễn tài khoản, phiên, danh tính mạng xã hội và **lịch sử đăng nhập (có IP)**. Các ván đã chơi được giữ (mất liên kết tài khoản, vẫn còn tên hiển thị lúc chơi) để đối thủ còn lịch sử |
+
 ## Cơ sở dữ liệu PostgreSQL
 
-Bảng (xem `migrations/001_init.sql`): `users`, `oauth_identities`, `sessions`, `oauth_states`, `oauth_codes`, `auth_events`, `games`, `schema_migrations`.
+Bảng (xem `migrations/*.sql`): `users`, `oauth_identities`, `sessions`, `oauth_states`, `oauth_codes`, `auth_events`, `games`, `schema_migrations`.
 
 - UUID do ứng dụng sinh (không cần extension). Mọi truy vấn dùng tham số nên không có nguy cơ SQL injection.
 - Mật khẩu chỉ lưu **băm scrypt**; token phiên, `state` OAuth và mã đổi token chỉ lưu **băm**. Lộ CSDL không lộ token đang dùng.
@@ -201,7 +229,7 @@ Lỗi lúc kết nối (`connect_error`): `invalid_player_id`, `invalid_token`, 
 | `session:replaced` | — | Bị kết nối khác cùng danh tính thay thế |
 
 `result`: `"red"` / `"black"` (phe **thắng**) hoặc `"draw"`. `reason`: `checkmate`, `stalemate` (hết nước đi, bên đó thua), `repetition`
-(lặp nước, hoà), `perpetual_check` (chiếu liên tục, bên chiếu thua), `timeout`, `resign`, `disconnect`, `agreement`.
+(lặp nước, hoà), `perpetual_check` (chiếu liên tục, bên chiếu thua), `no_capture` (60 nước mỗi bên không ăn quân, hoà), `timeout`, `resign`, `disconnect`, `agreement`.
 
 `state`: `roomId, gameId, status ('waiting'|'playing'|'over'), you, players {red, black} (name, connected, guest), turn, isCheck,
 repetitions, clock, board [{id,type,side,index,col,row}], moves [{from,to,pieceId,capturedId,givesCheck}], result, endReason, drawOfferFrom`.
@@ -218,7 +246,7 @@ Mất kết nối không làm đồng hồ dừng. Client chỉ đếm ngược 
 
 Thế cờ được nhận diện bằng vị trí quân (loại + phe) **và bên đến lượt**. Khi một thế cờ xuất hiện **lần thứ 3**: đúng một bên chiếu ở **mọi** nước của
 mình trong đoạn lặp thì bên đó **thua** (`perpetual_check`); cả hai cùng chiếu liên tục hoặc không bên nào thì **hoà** (`repetition`).
-Luật **đuổi quân liên tục** chưa được áp dụng.
+Ngoài ra **120 nước liên tiếp (60 mỗi bên) không có quân nào bị ăn** thì hoà (`no_capture`). Luật **đuổi quân liên tục** chưa được áp dụng.
 
 ## Quy tắc vận hành
 
@@ -228,8 +256,8 @@ Luật **đuổi quân liên tục** chưa được áp dụng.
 
 ## Chưa có
 
-- Xếp hạng Elo, bảng xếp hạng (đã có đủ dữ liệu ván để làm).
-- Quên/đổi mật khẩu (cần email), xoá tài khoản, đăng nhập Apple.
-- Luật đuổi quân liên tục, hoà do 60 nước không ăn quân; thời gian kiểu byo-yomi.
+- Quên mật khẩu (cần email đã xác minh và dịch vụ gửi thư), đăng nhập Apple.
+- Ghép trận theo Elo (hiện chỉ ghép theo mức thời gian), chống thông đồng đẩy điểm.
+- Luật đuổi quân liên tục; thời gian kiểu byo-yomi.
 - Chạy nhiều server: trạng thái phòng đang nằm trong bộ nhớ một tiến trình. Muốn mở rộng cần Redis adapter cho Socket.IO và lưu phòng ra ngoài
   (tài khoản, phiên và ván đã nằm sẵn trong PostgreSQL nên dùng chung được).

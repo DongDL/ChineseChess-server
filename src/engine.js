@@ -307,10 +307,13 @@ export function judgeRepetition(cycle) {
   return { result: 'draw', reason: 'repetition' };
 }
 
+/** Hoà nếu 60 nước mỗi bên (120 nước tính cả hai bên) liên tiếp không ai ăn quân. */
+export const NO_CAPTURE_LIMIT_PLIES = 120;
+
 /**
  * Một ván cờ: giữ bàn cờ, lượt đi, lịch sử và kết quả.
  * result: 'ongoing' | 'red' | 'black' | 'draw'  (red/black = bên THẮNG)
- * endReason: null | 'checkmate' | 'stalemate' | 'repetition' | 'perpetual_check'
+ * endReason: null | 'checkmate' | 'stalemate' | 'repetition' | 'perpetual_check' | 'no_capture'
  *            | 'resign' | 'disconnect' | 'agreement' | 'timeout'
  * Bên hết nước đi hợp lệ là bên THUA (dù có đang bị chiếu hay không).
  */
@@ -331,6 +334,13 @@ export class XiangqiGame {
   /** Số lần thế cờ hiện tại đã xuất hiện (1 = lần đầu). Đến lần 3 ván kết thúc. */
   get repetitionCount() {
     return this.counts.get(this.keys[this.keys.length - 1]) ?? 1;
+  }
+
+  /** Số nước (tính cả hai bên) liên tiếp gần nhất không có quân nào bị ăn. */
+  get pliesSinceCapture() {
+    let n = 0;
+    for (let i = this.history.length - 1; i >= 0 && !this.history[i].captured; i--) n++;
+    return n;
   }
 
   get isOver() {
@@ -396,6 +406,9 @@ export class XiangqiGame {
         .map((r) => ({ side: r.piece.side, givesCheck: r.givesCheck }));
       const verdict = judgeRepetition(cycle);
       this.forceEnd(verdict.result, verdict.reason);
+    }
+    if (!this.isOver && this.pliesSinceCapture >= NO_CAPTURE_LIMIT_PLIES) {
+      this.forceEnd('draw', 'no_capture');
     }
     return record;
   }

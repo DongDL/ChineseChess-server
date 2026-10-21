@@ -11,7 +11,7 @@ const port = Number(env.PORT ?? 3000);
 let store;
 if (env.DATABASE_URL) {
   store = new PgStore({ connectionString: env.DATABASE_URL });
-  if (env.AUTO_MIGRATE === '0') {
+  if (env.AUTO_MIGRATE !== '0') {
     const applied = await store.migrate({ log: console.log });
     if (applied.length === 0) console.log('CSDL PostgreSQL đã ở phiên bản mới nhất.');
   }

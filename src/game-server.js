@@ -499,7 +499,17 @@ export class GameServer {
     clearTimeout(room.flagTimer);
     room.flagTimer = null;
     // Lưu ván vào CSDL ở nền; không chờ để việc báo kết quả không bị chậm.
-    this.recorder?.record(room.toRecord());
+    // Ghi xong (và đã cập nhật Elo) thì báo điểm mới cho hai bên; ván không tính điểm vẫn gửi rated:false để app thôi chờ.
+    this.recorder?.record(room.toRecord(), (saved) => {
+      const r = saved?.rating ?? null;
+      this.io.to(room.id).emit('game:rating', {
+        roomId: room.id,
+        gameId: room.gameId,
+        rated: r !== null,
+        red: r?.red ?? null,
+        black: r?.black ?? null,
+      });
+    });
     this.io.to(room.id).emit('game:over', {
       roomId: room.id,
       gameId: room.gameId,

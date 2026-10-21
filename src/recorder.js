@@ -13,19 +13,28 @@ export class GameRecorder {
     this.pending = new Set();
   }
 
-  /** Bắt đầu ghi (không chờ). Trả về promise cho biết đã ghi được hay chưa. */
-  record(game) {
-    const p = this._save(game).finally(() => this.pending.delete(p));
+  /**
+   * Bắt đầu ghi (không chờ). Trả về promise cho biết đã ghi được hay chưa.
+   * [onSaved(result)] (tuỳ chọn) được gọi sau khi ghi thành công với kết quả của store.saveGame
+   * ({ inserted, rating }); lỗi trong callback không làm hỏng việc ghi.
+   */
+  record(game, onSaved = null) {
+    const p = this._save(game, onSaved).finally(() => this.pending.delete(p));
     this.pending.add(p);
     return p;
   }
 
-  async _save(game) {
+  async _save(game, onSaved) {
     let lastError;
     for (const wait of this.retryDelaysMs) {
       if (wait > 0) await sleep(wait);
       try {
-        await this.store.saveGame(game);
+        const result = await this.store.saveGame(game);
+        try {
+          onSaved?.(result);
+        } catch (err) {
+          this.log.error(`[recorder] lỗi trong onSaved của ván ${game.id}: ${err.message}`);
+        }
         return true;
       } catch (err) {
         lastError = err;

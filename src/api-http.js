@@ -1,4 +1,5 @@
 import { AuthError } from './auth.js';
+import { PROVISIONAL_GAMES } from './elo.js';
 import { bearerToken, makeJsonSender, sendError } from './http-util.js';
 
 const GAME_ID = /^\/games\/([0-9a-f-]{36})$/i;
@@ -8,12 +9,20 @@ const clampInt = (raw, def, min, max) => {
   return Number.isFinite(n) ? Math.min(max, Math.max(min, n)) : def;
 };
 
+const ratingChangeOf = (g, side) => {
+  const before = side === 'red' ? g.redRatingBefore : g.blackRatingBefore;
+  const after = side === 'red' ? g.redRatingAfter : g.blackRatingAfter;
+  return { before, after, delta: after - before };
+};
+
 /** Tóm tắt một ván theo góc nhìn của [userId]. */
 function summaryFor(g, userId) {
   const mySide = g.redUserId === userId ? 'red' : 'black';
   return {
     id: g.id,
     mySide,
+    rated: g.rated,
+    ratingChange: g.rated ? ratingChangeOf(g, mySide) : null,
     outcome: g.result === 'draw' ? 'draw' : g.result === mySide ? 'win' : 'loss',
     result: g.result,
     endReason: g.endReason,
@@ -33,6 +42,8 @@ function summaryFor(g, userId) {
  *   GET /me/games?limit=20&before=<endedAt ms>  (Bearer) -> { ok, games: [...], nextBefore }
  *   GET /me/stats                               (Bearer) -> { ok, stats: { total, wins, losses, draws } }
  *   GET /me/logins?limit=30                     (Bearer) -> { ok, events: [...] }  (lịch sử đăng nhập của chính bạn)
+ *   GET /me/rating                              (Bearer) -> { ok, rating: { rating, ratedGames, rank, provisional } }
+ *   GET /leaderboard?limit=50&offset=0          (Bearer tuỳ chọn, để đánh dấu isMe) -> { ok, players: [...], nextOffset }
  *   GET /games/:id                              -> { ok, game }  (xem lại ván; ai có id cũng xem được, id là UUID khó đoán)
  *
  * Chi tiết ván không lộ id tài khoản hay mã phòng của ai.
@@ -49,7 +60,7 @@ export function createApiRoutes(auth, store, { corsOrigin = '*' } = {}) {
   return async function handle(req, res) {
     const url = new URL(req.url ?? '/', 'http://localhost');
     const { pathname } = url;
-    if (!pathname.startsWith('/me/') && !pathname.startsWith('/games/')) return false;
+    if (!pathname.startsWith('/me/') && !pathname.startsWith('/games/') && pathname !== '/leaderboard') return false;
 
     if (req.method === 'OPTIONS') {
       send(res, 204, {});
@@ -75,6 +86,31 @@ export function createApiRoutes(auth, store, { corsOrigin = '*' } = {}) {
       } else if (pathname === '/me/stats') {
         const user = await requireUser(req);
         send(res, 200, { ok: true, stats: await store.statsOfUser(user.id) });
+      } else if (pathname === '/me/rating') {
+        const user = await requireUser(req);
+        const r = await store.getRating(user.id);
+        if (!r) throw new AuthError('not_found', 404);
+        send(res, 200, { ok: true, rating: { ...r, provisional: r.ratedGames < PROVISIONAL_GAMES } });
+      } else if (pathname === '/leaderboard') {
+        // Đăng nhập là tuỳ chọn: có token hợp lệ thì đánh dấu dòng của mình; token sai thì bỏ qua (đây là dữ liệu công khai).
+        const me = await auth.authenticate(bearerToken(req)).catch(() => null);
+        const limit = clampInt(q.get('limit'), 50, 1, 100);
+        const offset = clampInt(q.get('offset'), 0, 0, 100_000);
+        const rows = await store.listLeaderboard({ limit, offset });
+        send(res, 200, {
+          ok: true,
+          // Không lộ id tài khoản của ai; chỉ cờ isMe cho chính người đang xem.
+          players: rows.map((p) => ({
+            rank: p.rank,
+            displayName: p.displayName,
+            avatarUrl: p.avatarUrl ?? null,
+            rating: p.rating,
+            ratedGames: p.ratedGames,
+            provisional: p.ratedGames < PROVISIONAL_GAMES,
+            isMe: me !== null && p.userId === me.id,
+          })),
+          nextOffset: rows.length === limit ? offset + limit : null,
+        });
       } else if (pathname === '/me/logins') {
         const user = await requireUser(req);
         const events = await store.listAuthEvents(user.id, { limit: clampInt(q.get('limit'), 30, 1, 100) });
@@ -99,6 +135,13 @@ export function createApiRoutes(auth, store, { corsOrigin = '*' } = {}) {
             endReason: g.endReason,
             moveCount: g.moveCount,
             moves: g.moves,
+            rated: g.rated,
+            ratings: g.rated
+              ? {
+                red: { before: g.redRatingBefore, after: g.redRatingAfter },
+                black: { before: g.blackRatingBefore, after: g.blackRatingAfter },
+              }
+              : null,
             redRemainingMs: g.redRemainingMs,
             blackRemainingMs: g.blackRemainingMs,
             startedAt: g.startedAt,

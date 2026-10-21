@@ -3,6 +3,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'migrations');
+// Chỉ nhận file đánh số (001_init.sql, 002_...): file .sql khác (vd. script xoá CSDL) KHÔNG BAO GIỜ được chạy như migration.
+const MIGRATION_FILE = /^\d{3,}_[\w-]+\.sql$/;
 const LOCK_ID = 727001; // khoá tư vấn: nhiều server khởi động cùng lúc không chạy migration chồng nhau
 
 /**
@@ -19,7 +21,7 @@ export async function migrate(pool, { log = () => {} } = {}) {
     await client.query(`CREATE TABLE IF NOT EXISTS schema_migrations (
       name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`);
     const done = new Set((await client.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name));
-    const files = fs.readdirSync(MIGRATIONS_DIR).filter((f) => f.endsWith('.sql')).sort();
+    const files = fs.readdirSync(MIGRATIONS_DIR).filter((f) => MIGRATION_FILE.test(f)).sort();
     for (const file of files) {
       if (done.has(file)) continue;
       const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), 'utf8');

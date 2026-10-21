@@ -19,6 +19,8 @@ const html = (res, status, text) => {
  *   POST   /auth/login     { username, password }                -> { ok, token, user }
  *   GET    /auth/me        (Bearer)                              -> { ok, user: { ..., providers, hasPassword } }
  *   POST   /auth/logout    (Bearer)                              -> { ok }
+ *   POST   /auth/password  (Bearer) { currentPassword, newPassword } -> { ok, revoked }  (thu hồi các phiên khác)
+ *   POST   /auth/account/delete (Bearer) { password | confirm:'DELETE' } -> { ok }  (xoá tài khoản vĩnh viễn)
  *   POST   /auth/oauth/:provider/start  { appRedirect, link? }   -> { ok, url }  (link=true cần Bearer)
  *   GET    /auth/oauth/:provider/callback?code&state             -> 302 về app kèm ?code=... hoặc ?error=...
  *   POST   /auth/oauth/exchange  { code }                        -> { ok, token, user }
@@ -61,6 +63,14 @@ export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = f
       } else if (route === 'POST /auth/logout') {
         await requireUser(req);
         await auth.logout(bearerToken(req), ctx);
+        send(res, 200, { ok: true });
+      } else if (route === 'POST /auth/password') {
+        const user = await requireUser(req);
+        const revoked = await auth.changePassword(user.id, await readJson(req), bearerToken(req), ctx);
+        send(res, 200, { ok: true, revoked });
+      } else if (route === 'POST /auth/account/delete') {
+        const user = await requireUser(req);
+        await auth.deleteAccount(user.id, await readJson(req), ctx);
         send(res, 200, { ok: true });
       } else if (route === 'POST /auth/oauth/exchange') {
         const body = await readJson(req);

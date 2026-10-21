@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   XiangqiGame, boardFrom, pseudoMoves, toIndex, toPos, SIDE, TYPE,
-  positionKey, judgeRepetition,
+  positionKey, judgeRepetition, NO_CAPTURE_LIMIT_PLIES,
 } from '../src/engine.js';
 
 const { RED, BLACK } = SIDE;
@@ -249,4 +249,56 @@ test('judgeRepetition: phán quyết theo từng trường hợp', () => {
   // Đỏ xen 1 nước không chiếu giữa chừng -> không phải chiếu liên tục -> hoà
   assert.deepEqual(judgeRepetition([c('red', true), c('black', false), c('red', false), c('black', false)]),
     { result: 'draw', reason: 'repetition' });
+});
+
+// Ván "đi quanh" không ăn quân: hai tướng + mỗi bên một xe, chọn nước đi không ăn quân theo bộ sinh số giả ngẫu nhiên
+// cố định. Thử vài hạt giống cho tới khi có ván không kết thúc sớm vì lặp nước hay chiếu bí.
+function shuffleGame(seed) {
+  const g = new XiangqiGame({
+    board: boardFrom([
+      [3, 9, RED, TYPE.GENERAL], [5, 0, BLACK, TYPE.GENERAL],
+      [0, 5, RED, TYPE.CHARIOT], [8, 4, BLACK, TYPE.CHARIOT],
+    ]),
+  });
+  let x = seed;
+  const rnd = (n) => { x = (x * 1103515245 + 12345) % 2147483648; return x % n; };
+  while (!g.isOver && g.history.length < NO_CAPTURE_LIMIT_PLIES) {
+    const quiet = g.allLegalMoves().filter((m) => !g.board.get(m.to.row * 9 + m.to.col));
+    if (quiet.length === 0) break;
+    const m = quiet[rnd(quiet.length)];
+    g.play(m.from, m.to);
+  }
+  return g;
+}
+
+test('60 nước mỗi bên không ăn quân thì hoà (no_capture), đúng ở nước thứ 120', () => {
+  let g;
+  for (let seed = 1; seed < 200; seed++) {
+    g = shuffleGame(seed);
+    if (g.endReason === 'no_capture') break;
+  }
+  assert.equal(g.endReason, 'no_capture', 'không tìm được ván mẫu');
+  assert.equal(g.history.length, NO_CAPTURE_LIMIT_PLIES);
+  assert.equal(g.result, 'draw');
+  assert.equal(g.endReason, 'no_capture');
+  assert.equal(g.pliesSinceCapture, NO_CAPTURE_LIMIT_PLIES);
+  // Hoàn tác nước cuối thì ván tiếp tục (119 nước chưa đủ để hoà).
+  assert.equal(g.undo(), true);
+  assert.equal(g.isOver, false);
+  assert.equal(g.pliesSinceCapture, NO_CAPTURE_LIMIT_PLIES - 1);
+});
+
+test('ăn quân đặt lại bộ đếm 60 nước', () => {
+  const g = new XiangqiGame({
+    board: boardFrom([
+      [3, 9, RED, TYPE.GENERAL], [5, 0, BLACK, TYPE.GENERAL],
+      [0, 5, RED, TYPE.CHARIOT], [8, 5, BLACK, TYPE.CHARIOT],
+    ]),
+  });
+  move(g, [0, 5], [0, 4]);
+  move(g, [8, 5], [8, 4]);
+  assert.equal(g.pliesSinceCapture, 2);
+  move(g, [0, 4], [8, 4]); // xe Đỏ ăn xe Đen
+  assert.equal(g.history.at(-1).captured !== null, true);
+  assert.equal(g.pliesSinceCapture, 0);
 });

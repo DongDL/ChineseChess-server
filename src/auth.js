@@ -265,6 +265,53 @@ export class AuthService {
     };
   }
 
+  /** Xác nhận mật khẩu hiện tại của [userId] (dùng cho đổi mật khẩu / xoá tài khoản); sai nhiều lần thì bị khoá tạm. */
+  async _confirmPassword(user, password, ctx, event) {
+    const c = ctxOf(ctx);
+    if (!user.passwordHash) throw new AuthError('no_password', 400);
+    const key = `u:${user.id}`;
+    if (this.failUser.count(key) >= this.failUser.max) throw new AuthError('rate_limited', 429);
+    const ok = typeof password === 'string' && password.length <= 128
+      && (await verifyPassword(password, user.passwordHash));
+    if (!ok) {
+      this.failUser.take(key);
+      await this.recordEvent({ userId: user.id, event, method: 'password', success: false, detail: 'bad_password' }, c);
+      throw new AuthError('invalid_credentials', 401);
+    }
+    this.failUser.reset(key);
+  }
+
+  /**
+   * Đổi mật khẩu (cần mật khẩu hiện tại). Mọi phiên KHÁC phiên đang dùng bị thu hồi, nên kẻ đang giữ token cũ
+   * (nếu có) bị đá ra ngay. Trả về số phiên đã thu hồi.
+   */
+  async changePassword(userId, { currentPassword, newPassword }, currentToken, ctx) {
+    const user = await this.store.findUserById(userId);
+    if (!user) throw new AuthError('invalid_token', 401);
+    await this._confirmPassword(user, currentPassword, ctx, 'password_change_failed');
+    validatePassword(newPassword);
+    if (newPassword === currentPassword) throw new AuthError('same_password', 400);
+    await this.store.setPasswordHash(userId, await hashPassword(newPassword, this.scryptParams));
+    const revoked = await this.store.deleteSessionsOfUser(userId, sha256(currentToken ?? ''));
+    await this.recordEvent({ userId, event: 'password_change', method: 'password', success: true, detail: `revoked:${revoked}` }, ctx);
+    return revoked;
+  }
+
+  /**
+   * Xoá tài khoản vĩnh viễn. Tài khoản có mật khẩu phải nhập mật khẩu; tài khoản chỉ đăng nhập mạng xã hội
+   * phải gửi confirm = 'DELETE' (chỉ chặn bấm nhầm, không phải xác thực). Ván đã chơi được giữ lại ẩn danh hoá liên kết.
+   */
+  async deleteAccount(userId, { password, confirm }, ctx) {
+    const user = await this.store.findUserById(userId);
+    if (!user) throw new AuthError('invalid_token', 401);
+    if (user.passwordHash) {
+      await this._confirmPassword(user, password, ctx, 'delete_account_failed');
+    } else if (confirm !== 'DELETE') {
+      throw new AuthError('confirmation_required', 400);
+    }
+    await this.store.deleteUser(userId);
+  }
+
   /** Thu hồi token (đăng xuất). */
   async logout(token, ctx) {
     if (typeof token !== 'string') return;

@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { AuthService } from './auth.js';
 import { OAuthService } from './oauth.js';
+import { mailerFromEnv } from './mailer.js';
 import { providersFromEnv } from './providers.js';
 import { MemoryStore } from './stores/memory.js';
 import { PgStore } from './stores/pg.js';
@@ -22,7 +23,8 @@ if (env.DATABASE_URL) {
 }
 
 // ---- Đăng nhập: mật khẩu + Google/Facebook/Zalo (chỉ bật bên nào có đủ khoá trong biến môi trường) ----
-const authService = new AuthService({ store });
+const mailer = mailerFromEnv(env);
+const authService = new AuthService({ store, mailer, appName: env.APP_NAME ?? 'Cờ tướng online' });
 const providers = providersFromEnv(env);
 const oauth = new OAuthService({
   store,

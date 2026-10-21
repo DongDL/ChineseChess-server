@@ -26,6 +26,7 @@ export function createApp({
   recorder = new GameRecorder(store),
   authEventRetentionDays = 180,
   maintenanceMs = 60 * 60_000,
+  gameServerOptions = {}, // ghi đè tuỳ chọn của GameServer (ghép trận, đồng hồ...) — chủ yếu cho test
 } = {}) {
   let gameServer;
   const authRoutes = createAuthRoutes(authService, oauth, { corsOrigin, trustProxy });
@@ -51,7 +52,12 @@ export function createApp({
   });
 
   gameServer = new GameServer(io, {
-    graceMs, authService, recorder, ...(clockLimits ? { clockLimits } : {}),
+    graceMs,
+    authService,
+    recorder,
+    ratingOf: async (userId) => (await store.getRating(userId))?.rating ?? null,
+    ...(clockLimits ? { clockLimits } : {}),
+    ...gameServerOptions,
   });
   gameServer.attach();
 

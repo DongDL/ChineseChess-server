@@ -219,7 +219,9 @@ test('lỗi khi ghi lịch sử đăng nhập KHÔNG làm hỏng việc đăng n
 test('profile: liệt kê nhà cung cấp đã liên kết và cho biết có mật khẩu hay không', async () => {
   const { auth, store } = makeAuth();
   const { user } = await auth.register({ username: 'lamdong', password: 'matkhau123' });
-  assert.deepEqual(await auth.profile(user.id), { ...user, providers: [], hasPassword: true });
+  assert.deepEqual(await auth.profile(user.id), {
+    ...user, providers: [], hasPassword: true, recoveryEmail: null, recoveryEmailVerified: false,
+  });
   await store.createIdentity({ userId: user.id, provider: 'google', providerUserId: 'g-1' });
   assert.deepEqual((await auth.profile(user.id)).providers, ['google']);
   assert.equal(await auth.profile('00000000-0000-4000-8000-000000000000'), null);

@@ -37,6 +37,11 @@ export class Room {
     this.timers = { red: null, black: null }; // hẹn giờ chờ nối lại
     this.createdAt = Date.now();
     this.endedAt = null;
+    /** Khán giả đang xem: playerId -> { name, guest, userId }. Không xuất hiện trong state gửi cho client. */
+    this.spectators = new Map();
+    /** Chat gần nhất (chỉ giữ trong bộ nhớ, KHÔNG lưu CSDL; mất khi phòng bị xoá). */
+    this.chat = [];
+    this.chatSeq = 0;
   }
 
   sideOf(playerId) {

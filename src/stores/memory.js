@@ -11,7 +11,9 @@ import {
 export class MemoryStore {
   constructor({ ratedMinMoves = RATED_MIN_MOVES } = {}) {
     this.ratedMinMoves = ratedMinMoves;
-    this.users = new Map(); // id -> user
+    this.users = new Map();
+    /** `${userId}:${purpose}` -> mã email đang hiệu lực */
+    this.emailCodes = new Map(); // id -> user
     this.byUsername = new Map(); // username -> id
     this.identities = new Map(); // `${provider}\u0000${providerUserId}` -> identity
     this.sessions = new Map(); // tokenHash -> session
@@ -32,6 +34,7 @@ export class MemoryStore {
       id: randomUUID(), username, displayName, passwordHash, email, avatarUrl,
       createdAt: Date.now(), lastLoginAt: null,
       rating: DEFAULT_RATING, ratedGames: 0,
+      recoveryEmail: null, recoveryEmailVerifiedAt: null,
     };
     this.users.set(user.id, user);
     if (username !== null) this.byUsername.set(username, user.id);
@@ -70,6 +73,7 @@ export class MemoryStore {
   async deleteUser(userId) {
     const u = this.users.get(userId);
     if (!u) return false;
+    await this.deleteEmailCodes(userId);
     this.users.delete(userId);
     if (u.username !== null) this.byUsername.delete(u.username);
     for (const [k, i] of this.identities) if (i.userId === userId) this.identities.delete(k);
@@ -80,6 +84,64 @@ export class MemoryStore {
       if (g.blackUserId === userId) g.blackUserId = null;
     }
     return true;
+  }
+
+  // ------------------------------------------------------ email khôi phục
+
+  /** Đặt email khôi phục (CHƯA xác minh) và huỷ mã xác minh cũ. */
+  async setRecoveryEmail(userId, email) {
+    const u = this.users.get(userId);
+    if (!u) return;
+    u.recoveryEmail = email;
+    u.recoveryEmailVerifiedAt = null;
+    this.emailCodes.delete(`${userId}:verify_email`);
+  }
+
+  /** Đánh dấu email đã xác minh. Ném lỗi mã 'email_taken' nếu tài khoản khác đã xác minh cùng email. */
+  async markRecoveryEmailVerified(userId, at = Date.now()) {
+    const u = this.users.get(userId);
+    if (!u?.recoveryEmail) return;
+    const key = u.recoveryEmail.toLowerCase();
+    for (const o of this.users.values()) {
+      if (o.id !== userId && o.recoveryEmailVerifiedAt && o.recoveryEmail.toLowerCase() === key) {
+        throw Object.assign(new Error('email_taken'), { code: 'email_taken' });
+      }
+    }
+    u.recoveryEmailVerifiedAt = at;
+  }
+
+  async findUserByVerifiedEmail(email) {
+    const key = email.toLowerCase();
+    for (const u of this.users.values()) {
+      if (u.recoveryEmailVerifiedAt && u.recoveryEmail.toLowerCase() === key) return u;
+    }
+    return null;
+  }
+
+  /** Lưu mã (chỉ băm) cho (tài khoản, mục đích), thay mã cũ và đặt lại số lần sai. */
+  async putEmailCode({ userId, purpose, email, codeHash, expiresAt }) {
+    this.emailCodes.set(`${userId}:${purpose}`, {
+      userId, purpose, email, codeHash, attempts: 0, expiresAt,
+    });
+  }
+
+  async getEmailCode(userId, purpose) {
+    const c = this.emailCodes.get(`${userId}:${purpose}`);
+    return c ? { ...c } : null;
+  }
+
+  /** Tăng số lần nhập sai, trả về số lần mới. */
+  async bumpEmailCodeAttempts(userId, purpose) {
+    const c = this.emailCodes.get(`${userId}:${purpose}`);
+    if (!c) return 0;
+    c.attempts += 1;
+    return c.attempts;
+  }
+
+  async deleteEmailCodes(userId, purpose = null) {
+    for (const k of [...this.emailCodes.keys()]) {
+      if (k.startsWith(`${userId}:`) && (purpose === null || k.endsWith(`:${purpose}`))) this.emailCodes.delete(k);
+    }
   }
 
   async touchLogin(userId, at = Date.now()) {
@@ -177,6 +239,7 @@ export class MemoryStore {
         n++;
       }
     }
+    for (const [k, c] of this.emailCodes) if (c.expiresAt <= now) this.emailCodes.delete(k);
     for (const m of [this.oauthStates, this.exchangeCodes]) {
       for (const [k, v] of m) if (v.expiresAt <= now) m.delete(k);
     }

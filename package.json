@@ -17,10 +17,13 @@
   },
   "license": "MIT",
   "dependencies": {
+    "nodemailer": "^6.10.1",
     "pg": "^8.23.1",
     "socket.io": "^4.8.4"
   },
   "devDependencies": {
+    "mailparser": "^3.10.0",
+    "smtp-server": "^3.20.2",
     "socket.io-client": "^4.8.4"
   }
 }

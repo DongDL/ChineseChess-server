@@ -420,7 +420,9 @@ test('HTTP: đăng ký, đăng nhập, xem thông tin, đăng xuất', async () 
 
   const me = await http('GET', '/auth/me', undefined, login.body.token);
   assert.equal(me.status, 200);
-  assert.deepEqual(me.body.user, { ...reg.body.user, providers: [], hasPassword: true });
+  assert.deepEqual(me.body.user, {
+    ...reg.body.user, providers: [], hasPassword: true, recoveryEmail: null, recoveryEmailVerified: false,
+  });
 
   assert.equal((await http('POST', '/auth/logout', undefined, login.body.token)).status, 200);
   assert.equal((await http('GET', '/auth/me', undefined, login.body.token)).status, 401);

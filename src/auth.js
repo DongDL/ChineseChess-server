@@ -1,9 +1,13 @@
 import {
-  createHash, randomBytes, scrypt as scryptCb, timingSafeEqual,
+  createHash, randomBytes, randomInt, scrypt as scryptCb, timingSafeEqual,
 } from 'node:crypto';
 import { promisify } from 'node:util';
 
 const scrypt = promisify(scryptCb);
+
+const EMAIL_CODE_MAX_ATTEMPTS = 5;
+/** Băm của mã email, gắn với tài khoản và mục đích (mã đặt lại không dùng được làm mã xác minh và ngược lại). */
+const emailCodeHash = (userId, purpose, code) => createHash('sha256').update(`${userId}|${purpose}|${code}`).digest('hex');
 
 /** Lỗi nghiệp vụ có mã (gửi cho client) và mã HTTP tương ứng. */
 export class AuthError extends Error {
@@ -26,6 +30,16 @@ export function validateUsername(raw) {
   const u = raw.trim().toLowerCase();
   if (!USERNAME_RE.test(u)) throw new AuthError('invalid_username');
   return u;
+}
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** Email: không khoảng trắng, đúng dạng a@b.c, tối đa 254 ký tự. Trả về dạng chữ thường (so khớp không phân biệt hoa thường). */
+export function validateEmail(raw) {
+  if (typeof raw !== 'string') throw new AuthError('invalid_email');
+  const e = raw.trim().toLowerCase();
+  if (e.length > 254 || !EMAIL_RE.test(e)) throw new AuthError('invalid_email');
+  return e;
 }
 
 /** Mật khẩu: 8-128 ký tự. */
@@ -147,8 +161,14 @@ export class AuthService {
     scryptParams = DEFAULT_SCRYPT,
     limits = {},
     log = console,
+    mailer = null, // gửi email (xem src/mailer.js); null thì các chức năng email trả 'email_unavailable'
+    appName = 'Cờ tướng online',
+    emailCodeTtlMs = 15 * 60_000,
   }) {
     this.store = store;
+    this.mailer = mailer;
+    this.appName = appName;
+    this.emailCodeTtlMs = emailCodeTtlMs;
     this._now = now;
     this.log = log;
     this.sessionTtlMs = sessionTtlMs;
@@ -157,8 +177,16 @@ export class AuthService {
       registerPerIp: { max: 10, windowMs: 60 * 60_000 },
       loginPerIp: { max: 30, windowMs: 10 * 60_000 },
       failPerUser: { max: 10, windowMs: 10 * 60_000 },
+      emailPerUser: { max: 5, windowMs: 60 * 60_000 }, // số lần gửi mã xác minh email / giờ / tài khoản
+      forgotPerIp: { max: 10, windowMs: 60 * 60_000 },
+      forgotPerEmail: { max: 3, windowMs: 60 * 60_000 }, // tối đa 3 mã đặt lại / giờ / email
+      resetPerIp: { max: 20, windowMs: 60 * 60_000 },
       ...limits,
     };
+    this.emailPerUser = new RateLimiter({ ...L.emailPerUser, now });
+    this.forgotIp = new RateLimiter({ ...L.forgotPerIp, now });
+    this.forgotEmail = new RateLimiter({ ...L.forgotPerEmail, now });
+    this.resetIp = new RateLimiter({ ...L.resetPerIp, now });
     this.registerIp = new RateLimiter({ ...L.registerPerIp, now });
     this.loginIp = new RateLimiter({ ...L.loginPerIp, now });
     this.failUser = new RateLimiter({ ...L.failPerUser, now });
@@ -262,7 +290,149 @@ export class AuthService {
       ...publicUser(user),
       providers: identities.map((i) => i.provider),
       hasPassword: Boolean(user.passwordHash),
+      recoveryEmail: user.recoveryEmail ?? null,
+      recoveryEmailVerified: Boolean(user.recoveryEmailVerifiedAt),
     };
+  }
+
+  // ------------------------------------------------- email khôi phục và quên mật khẩu
+
+  /** Sinh mã 6 số, lưu BĂM của nó (hiệu lực emailCodeTtlMs) và trả về mã để gửi email. */
+  async _issueEmailCode(userId, purpose, email) {
+    const code = String(randomInt(0, 1_000_000)).padStart(6, '0');
+    await this.store.putEmailCode({
+      userId, purpose, email, codeHash: emailCodeHash(userId, purpose, code), expiresAt: this._now() + this.emailCodeTtlMs,
+    });
+    return code;
+  }
+
+  /**
+   * Kiểm tra mã người dùng nhập. Mỗi mã chỉ được nhập sai tối đa EMAIL_CODE_MAX_ATTEMPTS lần (sai đủ số lần là mã bị huỷ),
+   * hết hạn thì bỏ. Trả về bản ghi mã nếu đúng, null nếu sai/hết hạn/không có (mọi lý do sai đều như nhau với người gọi).
+   */
+  async _checkEmailCode(userId, purpose, input) {
+    const rec = await this.store.getEmailCode(userId, purpose);
+    if (!rec) return null;
+    if (rec.expiresAt <= this._now() || rec.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+      await this.store.deleteEmailCodes(userId, purpose);
+      return null;
+    }
+    const given = emailCodeHash(userId, purpose, typeof input === 'string' ? input.trim() : '');
+    const good = given.length === rec.codeHash.length
+      && timingSafeEqual(Buffer.from(given), Buffer.from(rec.codeHash));
+    if (good) return rec;
+    const attempts = await this.store.bumpEmailCodeAttempts(userId, purpose);
+    if (attempts >= EMAIL_CODE_MAX_ATTEMPTS) await this.store.deleteEmailCodes(userId, purpose);
+    return null;
+  }
+
+  /**
+   * Đặt email khôi phục (cần mật khẩu hiện tại, để kẻ cầm trộm token không đổi được email khôi phục) và gửi mã xác minh.
+   * Email CHƯA xác minh thì chưa dùng được cho quên mật khẩu.
+   */
+  async setRecoveryEmail(userId, { email, password }, ctx) {
+    if (!this.mailer) throw new AuthError('email_unavailable', 503);
+    const user = await this.store.findUserById(userId);
+    if (!user) throw new AuthError('invalid_token', 401);
+    await this._confirmPassword(user, password, ctx, 'email_change_failed');
+    const addr = validateEmail(email);
+    if (!this.emailPerUser.take(`u:${userId}`)) throw new AuthError('rate_limited', 429);
+    const owner = await this.store.findUserByVerifiedEmail(addr);
+    if (owner && owner.id !== userId) throw new AuthError('email_taken', 409);
+    if (owner) return { email: addr, verified: true }; // đã xác minh sẵn cho chính tài khoản này
+    await this.store.setRecoveryEmail(userId, addr);
+    const code = await this._issueEmailCode(userId, 'verify_email', addr);
+    try {
+      await this.mailer.send({
+        to: addr,
+        subject: `${this.appName}: mã xác minh email`,
+        text: `Mã xác minh email của bạn là ${code}.\nMã có hiệu lực ${Math.round(this.emailCodeTtlMs / 60_000)} phút.\n\n`
+          + 'Nếu bạn không yêu cầu, hãy bỏ qua email này.',
+      });
+    } catch (err) {
+      this.log.error('[auth] gửi email xác minh thất bại:', err.message);
+      await this.store.deleteEmailCodes(userId, 'verify_email');
+      throw new AuthError('email_send_failed', 502);
+    }
+    await this.recordEvent({ userId, event: 'email_set', method: 'password', success: true }, ctx);
+    return { email: addr, verified: false };
+  }
+
+  /** Nhập mã xác minh nhận qua email để xác nhận email khôi phục. */
+  async verifyRecoveryEmail(userId, { code }, ctx) {
+    const user = await this.store.findUserById(userId);
+    if (!user) throw new AuthError('invalid_token', 401);
+    if (!user.recoveryEmail) throw new AuthError('no_email', 400);
+    const rec = await this._checkEmailCode(userId, 'verify_email', code);
+    if (!rec || rec.email !== user.recoveryEmail) {
+      await this.recordEvent({ userId, event: 'email_verify_failed', method: 'email', success: false }, ctx);
+      throw new AuthError('invalid_email_code', 400);
+    }
+    try {
+      await this.store.markRecoveryEmailVerified(userId, this._now());
+    } catch (err) {
+      if (err.code === 'email_taken') {
+        await this.store.deleteEmailCodes(userId, 'verify_email');
+        throw new AuthError('email_taken', 409);
+      }
+      throw err;
+    }
+    await this.store.deleteEmailCodes(userId, 'verify_email');
+    await this.recordEvent({ userId, event: 'email_verified', method: 'email', success: true }, ctx);
+    return { email: user.recoveryEmail, verified: true };
+  }
+
+  /**
+   * Quên mật khẩu, bước 1: gửi mã đặt lại tới email ĐÃ XÁC MINH. Luôn trả về cùng một kết quả dù email có thuộc tài khoản
+   * nào không (chống dò email), và việc gửi thư chạy nền để thời gian phản hồi không lộ gì. Chỉ lỗi định dạng email,
+   * quá giới hạn tần suất và email chưa được bật mới báo ra ngoài.
+   */
+  async forgotPassword({ email }, ctx) {
+    if (!this.mailer) throw new AuthError('email_unavailable', 503);
+    const c = ctxOf(ctx);
+    if (!this.forgotIp.take(c.ip)) throw new AuthError('rate_limited', 429);
+    const addr = validateEmail(email);
+    if (!this.forgotEmail.take(addr)) return; // im lặng: không cho biết email này đã bị giới hạn
+    const user = await this.store.findUserByVerifiedEmail(addr);
+    if (!user || !user.passwordHash) return;
+    // Nền: lỗi gửi chỉ ghi log, không ảnh hưởng phản hồi.
+    (async () => {
+      const code = await this._issueEmailCode(user.id, 'reset_password', addr);
+      await this.mailer.send({
+        to: addr,
+        subject: `${this.appName}: mã đặt lại mật khẩu`,
+        text: `Mã đặt lại mật khẩu của bạn là ${code}.\nMã có hiệu lực ${Math.round(this.emailCodeTtlMs / 60_000)} phút và chỉ dùng được một lần.\n\n`
+          + 'Nếu bạn không yêu cầu, hãy bỏ qua email này: mật khẩu hiện tại của bạn vẫn an toàn.',
+      });
+      await this.recordEvent({ userId: user.id, event: 'password_reset_requested', method: 'email', success: true }, c);
+    })().catch((err) => this.log.error('[auth] gửi email đặt lại mật khẩu thất bại:', err.message));
+  }
+
+  /**
+   * Quên mật khẩu, bước 2: nhập email + mã + mật khẩu mới. Đúng thì đặt mật khẩu mới và THU HỒI MỌI PHIÊN (kẻ đang
+   * giữ token cũ bị đá ra). Mọi lý do sai (email lạ, mã sai, hết hạn, hết lượt thử) đều trả cùng một lỗi.
+   */
+  async resetPassword({ email, code, newPassword }, ctx) {
+    const c = ctxOf(ctx);
+    if (!this.resetIp.take(c.ip)) throw new AuthError('rate_limited', 429);
+    validatePassword(newPassword);
+    let addr;
+    try {
+      addr = validateEmail(email);
+    } catch {
+      throw new AuthError('invalid_email_code', 400);
+    }
+    const user = await this.store.findUserByVerifiedEmail(addr);
+    const rec = user ? await this._checkEmailCode(user.id, 'reset_password', code) : null;
+    if (!user || !rec || rec.email !== addr) {
+      await this.recordEvent({ userId: user?.id ?? null, event: 'password_reset_failed', method: 'email', success: false }, c);
+      throw new AuthError('invalid_email_code', 400);
+    }
+    await this.store.setPasswordHash(user.id, await hashPassword(newPassword, this.scryptParams));
+    await this.store.deleteEmailCodes(user.id);
+    const revoked = await this.store.deleteSessionsOfUser(user.id, null);
+    this.failUser.reset(`u:${user.id}`);
+    await this.recordEvent({ userId: user.id, event: 'password_reset', method: 'email', success: true, detail: `revoked:${revoked}` }, c);
   }
 
   /** Xác nhận mật khẩu hiện tại của [userId] (dùng cho đổi mật khẩu / xoá tài khoản); sai nhiều lần thì bị khoá tạm. */

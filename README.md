@@ -165,6 +165,46 @@ Ván chơi **trước** migration `002` không tính điểm. Muốn tính lại
 (chạy lại bao nhiêu lần cũng cho cùng kết quả; chặn ghi vào `users`/`games` trong vài giây).
 **Chưa chống:** hai người thông đồng thắng thua qua lại giữa hai tài khoản để "đẩy" điểm; cần thêm giới hạn theo cặp đối thủ nếu thành vấn đề thật.
 
+## Ghép trận theo Elo
+
+`queue:join` chỉ ghép những người chọn **cùng mức thời gian**, và chọn đối thủ có Elo **gần nhất**. Cửa sổ ban đầu là ±100 điểm, nới thêm
+10 điểm mỗi giây chờ (chờ 30 giây là ±400), nên không ai chờ mãi; server thử ghép lại mỗi 2 giây. Khách (không có Elo) ghép với khách;
+khách và tài khoản chỉ ghép với nhau khi một bên đã chờ quá 30 giây (ván đó không tính điểm). Tuỳ chỉnh qua tuỳ chọn `matchmaking` của `GameServer`.
+
+## Khán giả và chat
+
+| Sự kiện (client gửi) | Mô tả |
+|---|---|
+| `room:spectate { roomId }` | Xem phòng bằng mã. Ack: `{ roomId, state (you = null), chat, spectators }`. Nhận mọi sự kiện của phòng (nước đi, kết quả, chat) nhưng không đi quân được. Tối đa 50 khán giả/phòng (`too_many_spectators`). Người đang trong ván của mình không xem được (`already_in_room`); tự tạo/vào phòng thì thôi xem |
+| `room:leave` | Khán giả rời phòng xem |
+| `chat:send { text }` | Người chơi (kể cả khách) hoặc **khán giả có tài khoản** gửi tin; khán giả khách nhận `login_required` |
+
+Sự kiện server gửi: `chat:message { id, roomId, from: { name, role: red|black|spectator, guest }, text, at }`, `chat:history { roomId, messages }`
+(khi người chơi nối lại), `room:spectators { roomId, count }`, `spectate:state` (ván bắt đầu sau khi vào xem phòng chờ), `spectate:closed` (phòng bị xoá).
+
+Tin tối đa 200 ký tự (đếm theo ký tự), tối đa 5 tin / 10 giây / người; ký tự điều khiển và ký tự đảo chiều chữ bị loại. Giữ 50 tin gần nhất **chỉ trong bộ nhớ**
+(không lưu CSDL, mất khi phòng bị xoá). Server **không escape HTML**: client web phải tự escape. Chưa có lọc từ ngữ hay chặn người dùng.
+Khán giả mất kết nối là rời phòng xem (khác người chơi được giữ ván); app phải `room:spectate` lại. Mã phòng là thứ duy nhất kiểm soát ai được xem.
+
+## Email khôi phục và quên mật khẩu
+
+Tài khoản mật khẩu chưa có email nên cần thêm và **xác minh** email trước khi dùng được "quên mật khẩu". Email lưu ở `users.recovery_email`
+(tách khỏi `users.email` do Google/Facebook/Zalo trả về); chỉ email đã xác minh mới nhận mã, và mỗi email đã xác minh chỉ thuộc một tài khoản.
+
+| Lệnh | Mô tả |
+|---|---|
+| `POST /auth/email` | (Bearer) `{ email, password }` -> gửi mã xác minh 6 số. Cần mật khẩu hiện tại. Tối đa 5 lần gửi/giờ/tài khoản |
+| `POST /auth/email/verify` | (Bearer) `{ code }` -> xác minh |
+| `POST /auth/forgot` | `{ email }` -> luôn `{ ok }` nếu email hợp lệ (không lộ email nào có tài khoản; thư gửi nền). Tối đa 3 mã/giờ/email, 10 yêu cầu/giờ/IP |
+| `POST /auth/reset` | `{ email, code, newPassword }` -> đặt mật khẩu mới và **thu hồi mọi phiên**. Mọi lý do sai trả cùng lỗi `invalid_email_code` |
+
+Mã 6 số, hiệu lực 15 phút, dùng một lần, **sai 5 lần là huỷ**, chỉ lưu băm. Mã mới thay mã cũ.
+
+**Cấu hình gửi thư** (biến môi trường, xem `.env.example`): `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`.
+Gmail: `smtp.gmail.com` cổng 465 (`SMTP_SECURE=1`) hoặc 587, và `SMTP_PASS` phải là **Mật khẩu ứng dụng** (bật xác minh 2 bước rồi tạo ở tài khoản Google), không phải mật khẩu đăng nhập.
+Không đặt `SMTP_HOST`: khi phát triển mã được in ra console; khi `NODE_ENV=production` tính năng email bị tắt (API trả `email_unavailable`, 503).
+Cổng 587 bắt buộc nâng cấp TLS. **Không bao giờ commit `.env`.**
+
 ## Quản lý tài khoản
 
 | Lệnh | Mô tả |
@@ -256,8 +296,8 @@ Ngoài ra **120 nước liên tiếp (60 mỗi bên) không có quân nào bị 
 
 ## Chưa có
 
-- Quên mật khẩu (cần email đã xác minh và dịch vụ gửi thư), đăng nhập Apple.
-- Ghép trận theo Elo (hiện chỉ ghép theo mức thời gian), chống thông đồng đẩy điểm.
+- Đăng nhập Apple; xem danh sách ván đang diễn ra (hiện phải biết mã phòng); lọc từ ngữ / chặn người dùng trong chat.
+- Chạy nhiều server với Redis (hiện phòng, hàng đợi và bộ đếm giới hạn tần suất nằm trong bộ nhớ MỘT tiến trình); chống thông đồng đẩy điểm.
 - Luật đuổi quân liên tục; thời gian kiểu byo-yomi.
 - Chạy nhiều server: trạng thái phòng đang nằm trong bộ nhớ một tiến trình. Muốn mở rộng cần Redis adapter cho Socket.IO và lưu phòng ra ngoài
   (tài khoản, phiên và ván đã nằm sẵn trong PostgreSQL nên dùng chung được).

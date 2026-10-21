@@ -15,6 +15,8 @@ const userOf = (r) => r && {
   displayName: r.display_name,
   passwordHash: r.password_hash,
   email: r.email,
+  recoveryEmail: r.recovery_email,
+  recoveryEmailVerifiedAt: toMs(r.recovery_email_verified_at),
   avatarUrl: r.avatar_url,
   createdAt: toMs(r.created_at),
   lastLoginAt: toMs(r.last_login_at),
@@ -160,6 +162,87 @@ export class PgStore {
     }
   }
 
+  // ------------------------------------------------------ email khôi phục
+
+  /** Đặt email khôi phục (CHƯA xác minh) và huỷ mã xác minh cũ. */
+  async setRecoveryEmail(userId, email) {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(
+        'UPDATE users SET recovery_email = $2, recovery_email_verified_at = NULL WHERE id = $1',
+        [userId, email],
+      );
+      await client.query("DELETE FROM email_codes WHERE user_id = $1 AND purpose = 'verify_email'", [userId]);
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /** Đánh dấu email đã xác minh. Ném lỗi mã 'email_taken' nếu tài khoản khác đã xác minh cùng email. */
+  async markRecoveryEmailVerified(userId, at = Date.now()) {
+    try {
+      await this.pool.query(
+        'UPDATE users SET recovery_email_verified_at = $2 WHERE id = $1 AND recovery_email IS NOT NULL',
+        [userId, toDate(at)],
+      );
+    } catch (err) {
+      if (err.code === '23505') throw Object.assign(new Error('email_taken'), { code: 'email_taken' });
+      throw err;
+    }
+  }
+
+  async findUserByVerifiedEmail(email) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM users WHERE lower(recovery_email) = lower($1) AND recovery_email_verified_at IS NOT NULL',
+      [email],
+    );
+    return userOf(rows[0]) ?? null;
+  }
+
+  /** Lưu mã (chỉ băm) cho (tài khoản, mục đích), thay mã cũ và đặt lại số lần sai. */
+  async putEmailCode({ userId, purpose, email, codeHash, expiresAt }) {
+    await this.pool.query(
+      `INSERT INTO email_codes (user_id, purpose, email, code_hash, attempts, expires_at)
+       VALUES ($1, $2, $3, $4, 0, $5)
+       ON CONFLICT (user_id, purpose) DO UPDATE
+         SET email = $3, code_hash = $4, attempts = 0, expires_at = $5, created_at = now()`,
+      [userId, purpose, email, codeHash, toDate(expiresAt)],
+    );
+  }
+
+  async getEmailCode(userId, purpose) {
+    const { rows } = await this.pool.query(
+      'SELECT * FROM email_codes WHERE user_id = $1 AND purpose = $2',
+      [userId, purpose],
+    );
+    const r = rows[0];
+    return r ? {
+      userId: r.user_id, purpose: r.purpose, email: r.email, codeHash: r.code_hash,
+      attempts: r.attempts, expiresAt: toMs(r.expires_at),
+    } : null;
+  }
+
+  /** Tăng số lần nhập sai (nguyên tử), trả về số lần mới. */
+  async bumpEmailCodeAttempts(userId, purpose) {
+    const { rows } = await this.pool.query(
+      'UPDATE email_codes SET attempts = attempts + 1 WHERE user_id = $1 AND purpose = $2 RETURNING attempts',
+      [userId, purpose],
+    );
+    return rows[0]?.attempts ?? 0;
+  }
+
+  async deleteEmailCodes(userId, purpose = null) {
+    await this.pool.query(
+      'DELETE FROM email_codes WHERE user_id = $1 AND ($2::text IS NULL OR purpose = $2)',
+      [userId, purpose],
+    );
+  }
+
   async touchLogin(userId, at = Date.now()) {
     await this.pool.query('UPDATE users SET last_login_at = $2 WHERE id = $1', [userId, toDate(at)]);
   }
@@ -257,6 +340,7 @@ export class PgStore {
   async purgeExpired(now) {
     const d = toDate(now);
     const r = await this.pool.query('DELETE FROM sessions WHERE expires_at <= $1', [d]);
+    await this.pool.query('DELETE FROM email_codes WHERE expires_at <= $1', [d]);
     await this.pool.query('DELETE FROM oauth_states WHERE expires_at <= $1', [d]);
     await this.pool.query('DELETE FROM oauth_codes WHERE expires_at <= $1', [d]);
     return r.rowCount;

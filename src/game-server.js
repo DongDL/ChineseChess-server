@@ -1,4 +1,5 @@
 import { createHash, randomInt } from 'node:crypto';
+import { DEFAULT_RATING } from './elo.js';
 import { SIDE, opposite } from './engine.js';
 import { Room, SIDES, generateRoomId } from './room.js';
 import { DEFAULT_CLOCK_LIMITS, normalizeTimeControl, timeControlKey } from './clock.js';
@@ -11,6 +12,15 @@ const PLAYER_ID_RE = /^[A-Za-z0-9_-]{8,64}$/;
 // Giới hạn tần suất: tối đa 60 sự kiện / 5 giây cho mỗi kết nối.
 const RATE_WINDOW_MS = 5000;
 const RATE_MAX_EVENTS = 60;
+
+// Ghép trận theo Elo (xem GameServer.joinQueue).
+const MATCHMAKING_DEFAULTS = { baseWindow: 100, growthPerSec: 10, guestAfterMs: 30_000 };
+
+// Chat trong phòng.
+const CHAT_MAX_CHARS = 200;
+const CHAT_HISTORY = 50;
+const CHAT_RATE = { max: 5, windowMs: 10_000 }; // tối đa 5 tin / 10 giây / người
+const MAX_SPECTATORS = 50;
 
 const asObject = (v) => (v && typeof v === 'object' ? v : {});
 
@@ -34,6 +44,16 @@ function cleanName(name, fallback) {
 }
 
 /**
+ * Làm sạch tin chat: bỏ ký tự điều khiển (kể cả xuống dòng) và ký tự đảo chiều chữ (U+202A-202E, U+2066-2069, dùng để
+ * giả mạo nội dung), gộp khoảng trắng. Server KHÔNG escape HTML: client web phải tự escape khi hiển thị.
+ */
+export function cleanChat(raw) {
+  if (typeof raw !== 'string') return '';
+  // eslint-disable-next-line no-control-regex
+  return raw.replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
  * Server làm trọng tài: client chỉ GỬI Ý ĐỊNH đi quân, server kiểm tra bằng engine
  * rồi mới phát nước đi cho cả hai bên. Client không thể gian lận luật hay đi sai lượt.
  *
@@ -43,7 +63,14 @@ function cleanName(name, fallback) {
 export class GameServer {
   constructor(io, {
     graceMs = 60_000, sweepMs = 60_000, clockLimits = DEFAULT_CLOCK_LIMITS, authService = null, recorder = null,
+    ratingOf = null, matchmaking = {}, matchTickMs = 2000, now = Date.now,
   } = {}) {
+    this.ratingOf = ratingOf; // async (userId) => Elo hiện tại, dùng để ghép trận theo Elo (null: mọi tài khoản coi như 1500)
+    this.matchmaking = { ...MATCHMAKING_DEFAULTS, ...matchmaking };
+    this.matchTickMs = matchTickMs;
+    this.now = now; // đồng hồ có thể thay trong test
+    /** playerId -> roomId của phòng đang xem (khán giả) */
+    this.spectating = new Map();
     this.io = io;
     this.authService = authService;
     this.recorder = recorder; // ghi ván đã kết thúc vào CSDL (có thể null)
@@ -99,10 +126,13 @@ export class GameServer {
     this.io.on('connection', (socket) => this.onConnection(socket));
     this.sweeper = setInterval(() => this.sweep(), this.sweepMs);
     this.sweeper.unref?.();
+    this.matcher = setInterval(() => this.matchTick(), this.matchTickMs);
+    this.matcher.unref?.();
   }
 
   dispose() {
     clearInterval(this.sweeper);
+    clearInterval(this.matcher);
     for (const room of this.rooms.values()) {
       for (const side of SIDES) clearTimeout(room.timers[side]);
       clearTimeout(room.flagTimer);
@@ -147,6 +177,7 @@ export class GameServer {
     if (prev && prev.id !== socket.id) {
       prev.emit('session:replaced');
       prev.disconnect(true);
+      this.stopSpectating(playerId); // kết nối mới chưa ở trong phòng socket.io của phòng đang xem: xem lại bằng room:spectate
     }
 
     // Giới hạn tần suất (trả lỗi qua ack, bỏ qua gói tin).
@@ -182,6 +213,8 @@ export class GameServer {
     on('room:create', (p, reply) => this.createRoom(socket, p, reply));
     on('room:join', (p, reply) => this.joinRoom(socket, p, reply));
     on('room:leave', (p, reply) => this.leaveRoom(socket, reply));
+    on('room:spectate', (p, reply) => this.spectate(socket, p, reply));
+    on('chat:send', (p, reply) => this.handleChat(socket, p, reply));
     on('queue:join', (p, reply) => this.joinQueue(socket, p, reply));
     on('queue:leave', (p, reply) => {
       this.removeFromQueue(playerId);
@@ -193,7 +226,10 @@ export class GameServer {
     on('game:draw:respond', (p, reply) => this.handleDrawRespond(socket, p, reply));
     on('game:sync', (p, reply) => {
       const r = this.roomOf(playerId);
-      if (!r) return reply(fail('not_in_room'));
+      if (!r) {
+        const watching = this.rooms.get(this.spectating.get(playerId));
+        return watching ? reply(ok({ state: watching.toState(null) })) : reply(fail('not_in_room'));
+      }
       return reply(ok({ state: r.toState(r.sideOf(playerId)) }));
     });
 
@@ -206,6 +242,7 @@ export class GameServer {
     if (this.sockets.get(playerId) !== socket) return;
     this.sockets.delete(playerId);
     this.removeFromQueue(playerId);
+    this.stopSpectating(playerId);
 
     const room = this.roomOf(playerId);
     if (!room) return;
@@ -232,6 +269,7 @@ export class GameServer {
     room.seats[side].connected = true;
     socket.join(room.id);
     socket.emit('session:resume', room.toState(side));
+    if (room.chat.length > 0) socket.emit('chat:history', { roomId: room.id, messages: room.chat });
     socket.to(room.id).emit('opponent:status', { connected: true });
   }
 
@@ -248,6 +286,7 @@ export class GameServer {
       return reply(fail('bad_time_control'));
     }
     this.removeFromQueue(playerId);
+    this.stopSpectating(playerId);
 
     const side =
       payload.side === SIDE.RED || payload.side === SIDE.BLACK
@@ -278,6 +317,7 @@ export class GameServer {
     if (this.roomOf(playerId)) return reply(fail('already_in_room'));
     if (room.isFull || room.status !== 'waiting') return reply(fail('room_full'));
     this.removeFromQueue(playerId);
+    this.stopSpectating(playerId);
 
     const [side] = room.freeSides();
     room.seat(side, playerId, name, guest, userId);
@@ -288,47 +328,131 @@ export class GameServer {
     return this.startGame(room);
   }
 
-  joinQueue(socket, payload, reply) {
-    const { playerId } = socket.data;
-    this.leaveIfOver(playerId);
-    if (this.roomOf(playerId)) return reply(fail('already_in_room'));
-    let timeControl;
+  /**
+   * Xếp hàng ghép trận. Chỉ ghép với người chọn CÙNG mức thời gian, và ưu tiên người có Elo gần nhất:
+   * cửa sổ ghép ban đầu là ±matchmaking.baseWindow điểm, nới thêm growthPerSec điểm mỗi giây chờ (nên không ai chờ mãi).
+   * Khách (không có Elo) ghép với khách; khách và tài khoản chỉ ghép với nhau khi một bên đã chờ quá guestAfterMs
+   * (ván đó không tính điểm). Việc ghép lại được thử mỗi matchTickMs vì cửa sổ nới dần theo thời gian chờ.
+   */
+  async joinQueue(socket, payload, reply) {
     try {
-      timeControl = normalizeTimeControl(payload.timeControl, this.clockLimits);
-    } catch {
-      return reply(fail('bad_time_control'));
-    }
-    const key = timeControlKey(timeControl);
-    this.removeFromQueue(playerId);
-
-    // Chỉ ghép với người chọn CÙNG mức thời gian.
-    for (;;) {
-      const i = this.queue.findIndex((e) => e.key === key);
-      if (i < 0) break;
-      const [entry] = this.queue.splice(i, 1);
-      const other = this.sockets.get(entry.playerId);
-      if (!other || entry.playerId === playerId) continue;
-      this.leaveIfOver(entry.playerId);
-      if (this.roomOf(entry.playerId)) continue;
-
-      const room = new Room(generateRoomId((id) => this.rooms.has(id)), timeControl);
-      const [first, second] = randomInt(2) === 0 ? [other, socket] : [socket, other];
-      room.seat(SIDE.RED, first.data.playerId, first.data.name, first.data.guest, first.data.userId);
-      room.seat(SIDE.BLACK, second.data.playerId, second.data.name, second.data.guest, second.data.userId);
-      this.rooms.set(room.id, room);
-      for (const s of [first, second]) {
-        this.playerRoom.set(s.data.playerId, room.id);
-        s.join(room.id);
+      const { playerId, userId, guest } = socket.data;
+      this.leaveIfOver(playerId);
+      if (this.roomOf(playerId)) return reply(fail('already_in_room'));
+      let timeControl;
+      try {
+        timeControl = normalizeTimeControl(payload.timeControl, this.clockLimits);
+      } catch {
+        return reply(fail('bad_time_control'));
       }
+      const key = timeControlKey(timeControl);
+      this.removeFromQueue(playerId);
+
+      let rating = null; // khách không có Elo
+      if (!guest) {
+        rating = DEFAULT_RATING;
+        if (userId && this.ratingOf) {
+          try {
+            rating = (await this.ratingOf(userId)) ?? DEFAULT_RATING;
+          } catch (err) {
+            console.error('[queue] không đọc được Elo, dùng điểm mặc định:', err.message);
+          }
+        }
+      }
+      // Trong lúc chờ đọc Elo, trạng thái có thể đã đổi: kiểm tra lại.
+      if (this.sockets.get(playerId) !== socket) return undefined;
+      this.leaveIfOver(playerId);
+      if (this.roomOf(playerId)) return reply(fail('already_in_room'));
+      this.removeFromQueue(playerId);
+      this.stopSpectating(playerId);
+
+      const entry = { playerId, key, timeControl, rating, joinedAt: this.now() };
+      this.queue.push(entry);
+      const room = this.matchEntry(entry);
+      if (!room) return reply(ok({ matched: false }));
       reply(ok({ matched: true, roomId: room.id, side: room.sideOf(playerId) }));
-      for (const side of SIDES) {
-        this.sockets.get(room.seats[side].playerId)?.emit('match:found', { roomId: room.id, side });
-      }
-      return this.startGame(room);
+      return this.announce(room);
+    } catch (err) {
+      console.error('[queue:join]', err);
+      return reply(fail('internal_error'));
     }
+  }
 
-    this.queue.push({ playerId, key, timeControl });
-    return reply(ok({ matched: false }));
+  /** Cửa sổ chênh lệch Elo chấp nhận được của một người đang chờ. */
+  matchWindow(entry, now) {
+    const { baseWindow, growthPerSec } = this.matchmaking;
+    return baseWindow + (growthPerSec * Math.max(0, now - entry.joinedAt)) / 1000;
+  }
+
+  /** Hai người đang chờ có được ghép với nhau ở thời điểm [now] không (cùng mức thời gian do người gọi đảm bảo). */
+  compatible(a, b, now) {
+    if (a.rating === null && b.rating === null) return true;
+    if (a.rating !== null && b.rating !== null) {
+      return Math.abs(a.rating - b.rating) <= Math.max(this.matchWindow(a, now), this.matchWindow(b, now));
+    }
+    const { guestAfterMs } = this.matchmaking;
+    return now - a.joinedAt >= guestAfterMs || now - b.joinedAt >= guestAfterMs;
+  }
+
+  /** Độ "xa" giữa hai người để chọn đối thủ gần nhất (khách-khách = 0, khách-tài khoản = rất xa). */
+  matchDistance(a, b) {
+    if (a.rating === null && b.rating === null) return 0;
+    if (a.rating === null || b.rating === null) return 1_000_000;
+    return Math.abs(a.rating - b.rating);
+  }
+
+  /** Bỏ khỏi hàng đợi người đã ngắt kết nối hoặc đã vào ván khác. */
+  purgeQueue() {
+    this.queue = this.queue.filter((e) => {
+      if (!this.sockets.has(e.playerId)) return false;
+      this.leaveIfOver(e.playerId);
+      return !this.roomOf(e.playerId);
+    });
+  }
+
+  /** Tìm đối thủ phù hợp nhất cho [entry]; nếu có thì xếp cả hai vào phòng mới (chưa phát sự kiện) và trả về phòng. */
+  matchEntry(entry) {
+    this.purgeQueue();
+    const now = this.now();
+    let best = null;
+    for (const other of this.queue) {
+      if (other === entry || other.key !== entry.key || other.playerId === entry.playerId) continue;
+      if (!this.compatible(entry, other, now)) continue;
+      const d = this.matchDistance(entry, other);
+      if (!best || d < best.d) best = { other, d };
+    }
+    if (!best) return null;
+    this.queue = this.queue.filter((e) => e !== entry && e !== best.other);
+
+    const room = new Room(generateRoomId((id) => this.rooms.has(id)), entry.timeControl);
+    const socks = [this.sockets.get(entry.playerId), this.sockets.get(best.other.playerId)];
+    const [first, second] = randomInt(2) === 0 ? socks : [socks[1], socks[0]];
+    room.seat(SIDE.RED, first.data.playerId, first.data.name, first.data.guest, first.data.userId);
+    room.seat(SIDE.BLACK, second.data.playerId, second.data.name, second.data.guest, second.data.userId);
+    this.rooms.set(room.id, room);
+    for (const s of [first, second]) {
+      this.playerRoom.set(s.data.playerId, room.id);
+      s.join(room.id);
+    }
+    return room;
+  }
+
+  /** Báo cho hai người đã được ghép rồi bắt đầu ván. */
+  announce(room) {
+    for (const side of SIDES) {
+      this.sockets.get(room.seats[side].playerId)?.emit('match:found', { roomId: room.id, side });
+    }
+    this.startGame(room);
+  }
+
+  /** Thử ghép lại những người đang chờ (cửa sổ Elo nới dần theo thời gian chờ). Gọi định kỳ. */
+  matchTick() {
+    this.purgeQueue();
+    for (const entry of [...this.queue]) {
+      if (!this.queue.includes(entry)) continue; // đã được ghép trong vòng lặp này
+      const room = this.matchEntry(entry);
+      if (room) this.announce(room);
+    }
   }
 
   startGame(room) {
@@ -338,6 +462,10 @@ export class GameServer {
     this.scheduleFlag(room);
     for (const side of SIDES) {
       this.sockets.get(room.seats[side].playerId)?.emit('game:start', room.toState(side));
+    }
+    // Khán giả đã vào xem phòng chờ: gửi thế cờ khai cuộc (họ không có ghế nên không nhận game:start).
+    for (const pid of room.spectators.keys()) {
+      this.sockets.get(pid)?.emit('spectate:state', room.toState(null));
     }
   }
 
@@ -363,7 +491,10 @@ export class GameServer {
   leaveRoom(socket, reply) {
     const { playerId } = socket.data;
     const room = this.roomOf(playerId);
-    if (!room) return reply(ok());
+    if (!room) {
+      this.stopSpectating(playerId); // đang xem thì chỉ thôi xem
+      return reply(ok());
+    }
     if (room.status === 'playing') {
       this.finish(room, opposite(room.sideOf(playerId)), 'resign');
     }
@@ -385,7 +516,85 @@ export class GameServer {
       const seat = room.seats[s];
       return seat && this.playerRoom.get(seat.playerId) === room.id;
     });
-    if (!anyoneLeft) this.rooms.delete(room.id);
+    if (!anyoneLeft) this.dropRoom(room);
+  }
+
+  /** Xoá phòng; khán giả còn lại được báo để app đóng màn hình xem. */
+  dropRoom(room) {
+    for (const pid of [...room.spectators.keys()]) {
+      this.sockets.get(pid)?.emit('spectate:closed', { roomId: room.id });
+      this.stopSpectating(pid);
+    }
+    this.rooms.delete(room.id);
+  }
+
+  // ------------------------------------------------- khán giả và chat
+
+  /**
+   * Xem một phòng bằng mã phòng (ai biết mã là xem được; app công bố mã tuỳ người chơi). Khán giả nhận mọi sự kiện của
+   * phòng (nước đi, kết quả, chat) nhưng không đi quân được. Khách xem được nhưng không chat được (cần tài khoản).
+   */
+  spectate(socket, payload, reply) {
+    const { playerId, name, guest, userId } = socket.data;
+    const roomId = String(payload.roomId ?? '').trim().toUpperCase();
+    const room = this.rooms.get(roomId);
+    if (!room) return reply(fail('room_not_found'));
+    this.leaveIfOver(playerId);
+    if (this.roomOf(playerId)) return reply(fail('already_in_room'));
+    const already = this.spectating.get(playerId) === roomId;
+    if (!already && room.spectators.size >= MAX_SPECTATORS) return reply(fail('too_many_spectators'));
+    this.removeFromQueue(playerId);
+    if (!already) this.stopSpectating(playerId); // đang xem phòng khác thì chuyển sang
+    room.spectators.set(playerId, { name, guest, userId });
+    this.spectating.set(playerId, roomId);
+    socket.join(roomId);
+    this.emitSpectators(room);
+    return reply(ok({
+      roomId, state: room.toState(null), chat: room.chat, spectators: room.spectators.size,
+    }));
+  }
+
+  stopSpectating(playerId) {
+    const roomId = this.spectating.get(playerId);
+    if (!roomId) return;
+    this.spectating.delete(playerId);
+    this.sockets.get(playerId)?.leave(roomId);
+    const room = this.rooms.get(roomId);
+    if (room?.spectators.delete(playerId)) this.emitSpectators(room);
+  }
+
+  emitSpectators(room) {
+    this.io.to(room.id).emit('room:spectators', { roomId: room.id, count: room.spectators.size });
+  }
+
+  /** Gửi tin nhắn vào phòng: người chơi (kể cả khách) hoặc khán giả có tài khoản. */
+  handleChat(socket, payload, reply) {
+    const { playerId, name, guest } = socket.data;
+    let room = this.roomOf(playerId);
+    let role = room ? room.sideOf(playerId) : null;
+    if (!room) {
+      const watching = this.spectating.get(playerId);
+      room = watching ? this.rooms.get(watching) ?? null : null;
+      role = 'spectator';
+    }
+    if (!room) return reply(fail('not_in_room'));
+    if (role === 'spectator' && guest) return reply(fail('login_required'));
+
+    const text = cleanChat(payload.text);
+    if (text === '') return reply(fail('empty_message'));
+    if ([...text].length > CHAT_MAX_CHARS) return reply(fail('message_too_long'));
+
+    const now = this.now();
+    const times = (socket.data.chatTimes ??= []).filter((t) => now - t < CHAT_RATE.windowMs);
+    if (times.length >= CHAT_RATE.max) return reply(fail('chat_rate_limited'));
+    times.push(now);
+    socket.data.chatTimes = times;
+
+    const msg = { id: ++room.chatSeq, roomId: room.id, from: { name, role, guest }, text, at: now };
+    room.chat.push(msg);
+    if (room.chat.length > CHAT_HISTORY) room.chat.shift();
+    this.io.to(room.id).emit('chat:message', msg);
+    return reply(ok({ id: msg.id }));
   }
 
   // ----------------------------------------------------------- ván cờ
@@ -530,7 +739,7 @@ export class GameServer {
         const seat = room.seats[side];
         if (seat) this.detach(seat.playerId);
       }
-      this.rooms.delete(room.id);
+      this.dropRoom(room);
     }
   }
 }

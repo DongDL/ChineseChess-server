@@ -20,6 +20,11 @@ const html = (res, status, text) => {
  *   GET    /auth/me        (Bearer)                              -> { ok, user: { ..., providers, hasPassword } }
  *   POST   /auth/logout    (Bearer)                              -> { ok }
  *   POST   /auth/password  (Bearer) { currentPassword, newPassword } -> { ok, revoked }  (thu hồi các phiên khác)
+
+ *   POST   /auth/email     (Bearer) { email, password }          -> { ok, email, verified }  (gửi mã xác minh 6 số tới email)
+ *   POST   /auth/email/verify (Bearer) { code }                  -> { ok, email, verified }
+ *   POST   /auth/forgot    { email }                             -> { ok }  (luôn ok nếu email hợp lệ; gửi mã nếu email đã xác minh)
+ *   POST   /auth/reset     { email, code, newPassword }          -> { ok }  (thu hồi mọi phiên)
  *   POST   /auth/account/delete (Bearer) { password | confirm:'DELETE' } -> { ok }  (xoá tài khoản vĩnh viễn)
  *   POST   /auth/oauth/:provider/start  { appRedirect, link? }   -> { ok, url }  (link=true cần Bearer)
  *   GET    /auth/oauth/:provider/callback?code&state             -> 302 về app kèm ?code=... hoặc ?error=...
@@ -68,6 +73,18 @@ export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = f
         const user = await requireUser(req);
         const revoked = await auth.changePassword(user.id, await readJson(req), bearerToken(req), ctx);
         send(res, 200, { ok: true, revoked });
+      } else if (route === 'POST /auth/email') {
+        const user = await requireUser(req);
+        send(res, 200, { ok: true, ...(await auth.setRecoveryEmail(user.id, await readJson(req), ctx)) });
+      } else if (route === 'POST /auth/email/verify') {
+        const user = await requireUser(req);
+        send(res, 200, { ok: true, ...(await auth.verifyRecoveryEmail(user.id, await readJson(req), ctx)) });
+      } else if (route === 'POST /auth/forgot') {
+        await auth.forgotPassword(await readJson(req), ctx);
+        send(res, 200, { ok: true });
+      } else if (route === 'POST /auth/reset') {
+        await auth.resetPassword(await readJson(req), ctx);
+        send(res, 200, { ok: true });
       } else if (route === 'POST /auth/account/delete') {
         const user = await requireUser(req);
         await auth.deleteAccount(user.id, await readJson(req), ctx);

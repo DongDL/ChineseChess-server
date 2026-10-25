@@ -19,7 +19,9 @@ export class GameRecorder {
    * ({ inserted, rating }); lỗi trong callback không làm hỏng việc ghi.
    */
   record(game, onSaved = null) {
-    const p = this._save(game, onSaved).finally(() => this.pending.delete(p));
+    // Record cũ không có variant luôn được hiểu là Xiangqi; không làm thay đổi object của Room.
+    const normalized = game.variant ? game : { ...game, variant: 'xiangqi', seed: null, seedHash: null };
+    const p = this._save(normalized, onSaved).finally(() => this.pending.delete(p));
     this.pending.add(p);
     return p;
   }

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { migrate } from '../migrate.js';
 import {
-  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame,
+  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame, normalizeRatingVariant,
 } from '../elo.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -36,6 +36,9 @@ const identityOf = (r) => r && {
 const gameSummaryOf = (r) => ({
   id: r.id,
   roomId: r.room_id,
+  variant: r.variant ?? 'xiangqi',
+  seed: r.seed ?? null,
+  seedHash: r.seed_hash ?? null,
   redUserId: r.red_user_id,
   blackUserId: r.black_user_id,
   redName: r.red_name,
@@ -91,7 +94,7 @@ export class PgStore {
   /** Chỉ dùng trong test: xoá sạch dữ liệu. */
   async _truncateAllForTests() {
     await this.pool.query(`TRUNCATE auth_events, oauth_codes, oauth_states, sessions,
-      oauth_identities, games, users RESTART IDENTITY CASCADE`);
+      oauth_identities, ratings, games, users RESTART IDENTITY CASCADE`);
   }
 
   // --------------------------------------------------------------------- người dùng
@@ -446,24 +449,41 @@ export class PgStore {
       await client.query('BEGIN');
       // Khoá hai dòng người dùng TRƯỚC khi chèn ván (theo thứ tự id). Nếu chèn trước, khoá khoá-ngoại (FOR KEY SHARE)
       // mà INSERT lấy trên dòng người dùng sẽ xung đột khi sau đó xin FOR UPDATE -> deadlock giữa hai ván đồng thời.
+      const variant = normalizeRatingVariant(g.variant ?? 'xiangqi');
       const flat = {
         redUserId, blackUserId, redGuest: g.red.guest, blackGuest: g.black.guest, moveCount: g.moves.length,
       };
       let locked = [];
       if (isRatedGame(flat, this.ratedMinMoves)) {
-        locked = (await client.query(
-          'SELECT id, rating, rated_games FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
+        // Khoá user trước để tránh race xoá/FK, rồi tạo và khoá đúng hai dòng rating của biến thể.
+        const users = (await client.query(
+          'SELECT id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
           [[redUserId, blackUserId]],
         )).rows;
+        if (users.length === 2) {
+          await client.query(
+            `INSERT INTO ratings (user_id, variant) SELECT unnest($1::uuid[]), $2
+             ON CONFLICT (user_id, variant) DO NOTHING`,
+            [[redUserId, blackUserId], variant],
+          );
+          locked = (await client.query(
+            `SELECT user_id AS id, elo AS rating, games_played AS rated_games
+               FROM ratings WHERE user_id = ANY($1::uuid[]) AND variant = $2
+               ORDER BY user_id FOR UPDATE`,
+            [[redUserId, blackUserId], variant],
+          )).rows;
+        }
       }
       const ins = await client.query(
-        `INSERT INTO games (id, room_id, red_user_id, black_user_id, red_name, black_name, red_guest, black_guest,
+        `INSERT INTO games (id, room_id, variant, seed, seed_hash,
+           red_user_id, black_user_id, red_name, black_name, red_guest, black_guest,
            base_ms, increment_ms, result, end_reason, move_count, moves, red_remaining_ms, black_remaining_ms,
            started_at, ended_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15, $16, $17, $18)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17::jsonb, $18, $19, $20, $21)
          ON CONFLICT (id) DO NOTHING RETURNING id`,
         [
-          g.id, g.roomId, redUserId, blackUserId, g.red.name, g.black.name, g.red.guest, g.black.guest,
+          g.id, g.roomId, variant, g.seed ?? null, g.seedHash ?? null,
+          redUserId, blackUserId, g.red.name, g.black.name, g.red.guest, g.black.guest,
           g.timeControl?.baseMs ?? null, g.timeControl?.incrementMs ?? null, g.result, g.endReason,
           g.moves.length, JSON.stringify(g.moves), g.clock?.redMs ?? null, g.clock?.blackMs ?? null,
           toDate(g.startedAt), toDate(g.endedAt),
@@ -485,9 +505,16 @@ export class PgStore {
             { rating: black.rating, games: black.rated_games },
             g.result,
           );
-          const upd = 'UPDATE users SET rating = $2, rated_games = rated_games + 1 WHERE id = $1';
-          await client.query(upd, [redUserId, rating.red.after]);
-          await client.query(upd, [blackUserId, rating.black.after]);
+          const upd = `UPDATE ratings SET elo = $3, games_played = games_played + 1
+                       WHERE user_id = $1 AND variant = $2`;
+          await client.query(upd, [redUserId, variant, rating.red.after]);
+          await client.query(upd, [blackUserId, variant, rating.black.after]);
+          // Columns cũ tiếp tục phản chiếu Xiangqi để tương thích công cụ cũ.
+          if (variant === 'xiangqi') {
+            const legacy = 'UPDATE users SET rating = $2, rated_games = rated_games + 1 WHERE id = $1';
+            await client.query(legacy, [redUserId, rating.red.after]);
+            await client.query(legacy, [blackUserId, rating.black.after]);
+          }
           await client.query(
             `UPDATE games SET rated = true, red_rating_before = $2, red_rating_after = $3,
                black_rating_before = $4, black_rating_after = $5 WHERE id = $1`,
@@ -511,28 +538,32 @@ export class PgStore {
     return rows[0] ? { ...gameSummaryOf(rows[0]), moves: rows[0].moves } : null;
   }
 
-  async listGamesOfUser(userId, { limit = 20, before = null } = {}) {
+  async listGamesOfUser(userId, { limit = 20, before = null, variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     const { rows } = await this.pool.query(
-      `SELECT id, room_id, red_user_id, black_user_id, red_name, black_name, red_guest, black_guest,
+      `SELECT id, room_id, variant, seed, seed_hash,
+              red_user_id, black_user_id, red_name, black_name, red_guest, black_guest,
               base_ms, increment_ms, result, end_reason, move_count, red_remaining_ms, black_remaining_ms,
               started_at, ended_at, rated, red_rating_before, red_rating_after, black_rating_before, black_rating_after
          FROM games
-        WHERE (red_user_id = $1 OR black_user_id = $1) AND ($2::timestamptz IS NULL OR ended_at < $2)
+        WHERE (red_user_id = $1 OR black_user_id = $1) AND variant = $2
+          AND ($3::timestamptz IS NULL OR ended_at < $3)
         ORDER BY ended_at DESC
-        LIMIT $3`,
-      [userId, toDate(before), limit],
+        LIMIT $4`,
+      [userId, variant, toDate(before), limit],
     );
     return rows.map(gameSummaryOf);
   }
 
-  async statsOfUser(userId) {
+  async statsOfUser(userId, { variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     const { rows } = await this.pool.query(
       `SELECT count(*) AS total,
          count(*) FILTER (WHERE (red_user_id = $1 AND result = 'red') OR (black_user_id = $1 AND result = 'black')) AS wins,
          count(*) FILTER (WHERE (red_user_id = $1 AND result = 'black') OR (black_user_id = $1 AND result = 'red')) AS losses,
          count(*) FILTER (WHERE result = 'draw') AS draws
-       FROM games WHERE red_user_id = $1 OR black_user_id = $1`,
-      [userId],
+       FROM games WHERE (red_user_id = $1 OR black_user_id = $1) AND variant = $2`,
+      [userId, variant],
     );
     const r = rows[0];
     return { total: Number(r.total), wins: Number(r.wins), losses: Number(r.losses), draws: Number(r.draws) };
@@ -541,30 +572,34 @@ export class PgStore {
   // ------------------------------------------------------------------ xếp hạng Elo
 
   /** { rating, ratedGames, rank } của một tài khoản; rank là null nếu chưa có ván tính điểm. null nếu không có tài khoản. */
-  async getRating(userId) {
+  async getRating(userId, variant = 'xiangqi') {
+    variant = normalizeRatingVariant(variant);
     if (!UUID_RE.test(String(userId))) return null;
     const { rows } = await this.pool.query(
-      `SELECT rating, rated_games,
-         CASE WHEN rated_games > 0
-           THEN 1 + (SELECT count(*) FROM users o WHERE o.rated_games > 0 AND o.rating > u.rating) END AS rank
-       FROM users u WHERE id = $1`,
-      [userId],
+      `SELECT COALESCE(r.elo, $3) AS rating, COALESCE(r.games_played, 0) AS rated_games,
+         CASE WHEN COALESCE(r.games_played, 0) > 0 THEN 1 + (
+           SELECT count(*) FROM ratings o WHERE o.variant = $2 AND o.games_played > 0 AND o.elo > r.elo
+         ) END AS rank
+       FROM users u LEFT JOIN ratings r ON r.user_id = u.id AND r.variant = $2
+       WHERE u.id = $1`,
+      [userId, variant, DEFAULT_RATING],
     );
     const r = rows[0];
     return r ? { rating: r.rating, ratedGames: r.rated_games, rank: r.rank === null ? null : Number(r.rank) } : null;
   }
 
-  /** Bảng xếp hạng (chỉ người có ít nhất một ván tính điểm). Cùng điểm thì cùng hạng (1, 2, 2, 4). */
-  async listLeaderboard({ limit = 50, offset = 0 } = {}) {
+  async listLeaderboard({ limit = 50, offset = 0, variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     const { rows } = await this.pool.query(
       `SELECT * FROM (
-         SELECT id, display_name, avatar_url, rating, rated_games,
-                RANK() OVER (ORDER BY rating DESC) AS rank
-           FROM users WHERE rated_games > 0
+         SELECT u.id, u.display_name, u.avatar_url, r.elo AS rating, r.games_played AS rated_games,
+                RANK() OVER (ORDER BY r.elo DESC) AS rank
+           FROM ratings r JOIN users u ON u.id = r.user_id
+          WHERE r.variant = $3 AND r.games_played > 0
        ) t
        ORDER BY rating DESC, rated_games DESC, id
        LIMIT $1 OFFSET $2`,
-      [limit, offset],
+      [limit, offset, variant],
     );
     return rows.map((r) => ({
       rank: Number(r.rank),
@@ -584,28 +619,34 @@ export class PgStore {
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('LOCK TABLE users, games IN EXCLUSIVE MODE');
+      await client.query('LOCK TABLE users, ratings, games IN EXCLUSIVE MODE');
+      await client.query('DELETE FROM ratings');
       await client.query('UPDATE users SET rating = $1, rated_games = 0', [DEFAULT_RATING]);
       await client.query(`UPDATE games SET rated = false, red_rating_before = NULL, red_rating_after = NULL,
         black_rating_before = NULL, black_rating_after = NULL`);
       const { rows: games } = await client.query(
-        `SELECT id, red_user_id, black_user_id, red_guest, black_guest, result, move_count
+        `SELECT id, variant, red_user_id, black_user_id, red_guest, black_guest, result, move_count
            FROM games ORDER BY ended_at, id`,
       );
-      const state = new Map(); // userId -> { rating, games }
-      const of = (id) => {
-        if (!state.has(id)) state.set(id, { rating: DEFAULT_RATING, games: 0 });
-        return state.get(id);
+      const { rows: users } = await client.query('SELECT id FROM users');
+      const userIds = new Set(users.map((u) => u.id));
+      const state = new Map();
+      const keyOf = (id, variant) => `${id}:${variant}`;
+      const of = (id, variant) => {
+        const key = keyOf(id, variant);
+        if (!state.has(key)) state.set(key, { userId: id, variant, rating: DEFAULT_RATING, games: 0 });
+        return state.get(key);
       };
+      for (const id of userIds) of(id, 'xiangqi');
       let rated = 0;
       for (const g of games) {
         const flat = {
           redUserId: g.red_user_id, blackUserId: g.black_user_id,
           redGuest: g.red_guest, blackGuest: g.black_guest, moveCount: g.move_count,
         };
-        if (!isRatedGame(flat, this.ratedMinMoves)) continue;
-        const red = of(g.red_user_id);
-        const black = of(g.black_user_id);
+        if (!userIds.has(g.red_user_id) || !userIds.has(g.black_user_id) || !isRatedGame(flat, this.ratedMinMoves)) continue;
+        const variant = g.variant ?? 'xiangqi';
+        const red = of(g.red_user_id, variant); const black = of(g.black_user_id, variant);
         const r = computeRatings(red, black, g.result);
         red.rating = r.red.after; red.games += 1;
         black.rating = r.black.after; black.games += 1;
@@ -616,8 +657,14 @@ export class PgStore {
         );
         rated++;
       }
-      for (const [id, s] of state) {
-        await client.query('UPDATE users SET rating = $2, rated_games = $3 WHERE id = $1', [id, s.rating, s.games]);
+      for (const s of state.values()) {
+        await client.query(
+          `INSERT INTO ratings (user_id, variant, elo, games_played) VALUES ($1, $2, $3, $4)`,
+          [s.userId, s.variant, s.rating, s.games],
+        );
+        if (s.variant === 'xiangqi') {
+          await client.query('UPDATE users SET rating = $2, rated_games = $3 WHERE id = $1', [s.userId, s.rating, s.games]);
+        }
       }
       await client.query('COMMIT');
       return { games: games.length, rated };

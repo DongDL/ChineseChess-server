@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame,
+  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame, normalizeRatingVariant,
 } from '../elo.js';
 
 /**
@@ -22,9 +22,27 @@ export class MemoryStore {
     this.events = [];
     this.nextEventId = 1;
     this.games = new Map(); // id -> game
+    /** `${userId}:${variant}` -> { rating, ratedGames } */
+    this.ratings = new Map();
   }
 
   async close() {}
+
+  _ratingKey(userId, variant = 'xiangqi') { return `${userId}:${variant}`; }
+
+  _ratingState(userId, variant = 'xiangqi', create = true) {
+    const key = this._ratingKey(userId, variant);
+    if (!this.ratings.has(key) && create) this.ratings.set(key, { rating: DEFAULT_RATING, ratedGames: 0 });
+    const state = this.ratings.get(key) ?? null;
+    // Giữ tương thích với code cũ thao tác trực tiếp users.rating.
+    const user = this.users.get(userId);
+    if (state && variant === 'xiangqi' && user
+        && (state.rating !== user.rating || state.ratedGames !== user.ratedGames)) {
+      state.rating = user.rating;
+      state.ratedGames = user.ratedGames;
+    }
+    return state;
+  }
 
   // --------------------------------------------------------------------- người dùng
 
@@ -37,6 +55,7 @@ export class MemoryStore {
       recoveryEmail: null, recoveryEmailVerifiedAt: null,
     };
     this.users.set(user.id, user);
+    this._ratingState(user.id, 'xiangqi');
     if (username !== null) this.byUsername.set(username, user.id);
     return { ...user };
   }
@@ -75,6 +94,7 @@ export class MemoryStore {
     if (!u) return false;
     await this.deleteEmailCodes(userId);
     this.users.delete(userId);
+    for (const key of [...this.ratings.keys()]) if (key.startsWith(`${userId}:`)) this.ratings.delete(key);
     if (u.username !== null) this.byUsername.delete(u.username);
     for (const [k, i] of this.identities) if (i.userId === userId) this.identities.delete(k);
     for (const [k, s] of this.sessions) if (s.userId === userId) this.sessions.delete(k);
@@ -312,23 +332,34 @@ export class MemoryStore {
       blackGuest: g.black.guest,
       moveCount: g.moves.length,
     };
+    const variant = normalizeRatingVariant(g.variant ?? 'xiangqi');
     const red = this.users.get(flat.redUserId);
     const black = this.users.get(flat.blackUserId);
     let rating = null;
     if (red && black && isRatedGame(flat, this.ratedMinMoves)) {
+      const redState = this._ratingState(red.id, variant);
+      const blackState = this._ratingState(black.id, variant);
       rating = computeRatings(
-        { rating: red.rating, games: red.ratedGames },
-        { rating: black.rating, games: black.ratedGames },
+        { rating: redState.rating, games: redState.ratedGames },
+        { rating: blackState.rating, games: blackState.ratedGames },
         g.result,
       );
-      red.rating = rating.red.after;
-      red.ratedGames += 1;
-      black.rating = rating.black.after;
-      black.ratedGames += 1;
+      redState.rating = rating.red.after;
+      redState.ratedGames += 1;
+      blackState.rating = rating.black.after;
+      blackState.ratedGames += 1;
+      // Giữ các field cũ đồng bộ riêng cho Xiangqi.
+      if (variant === 'xiangqi') {
+        red.rating = redState.rating; red.ratedGames = redState.ratedGames;
+        black.rating = blackState.rating; black.ratedGames = blackState.ratedGames;
+      }
     }
     this.games.set(g.id, {
       id: g.id,
       roomId: g.roomId,
+      variant,
+      seed: g.seed ?? null,
+      seedHash: g.seedHash ?? null,
       redUserId: g.red.userId ?? null,
       blackUserId: g.black.userId ?? null,
       redName: g.red.name,
@@ -360,21 +391,25 @@ export class MemoryStore {
   }
 
   /** Các ván của một tài khoản (mới nhất trước), không kèm danh sách nước đi. */
-  async listGamesOfUser(userId, { limit = 20, before = null } = {}) {
+  async listGamesOfUser(userId, { limit = 20, before = null, variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     return [...this.games.values()]
       .filter((g) => g.redUserId === userId || g.blackUserId === userId)
+      .filter((g) => (g.variant ?? 'xiangqi') === variant)
       .filter((g) => before === null || g.endedAt < before)
       .sort((a, b) => b.endedAt - a.endedAt)
       .slice(0, limit)
       .map(({ moves, ...summary }) => ({ ...summary }));
   }
 
-  async statsOfUser(userId) {
+  async statsOfUser(userId, { variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     let total = 0;
     let wins = 0;
     let losses = 0;
     let draws = 0;
     for (const g of this.games.values()) {
+      if ((g.variant ?? 'xiangqi') !== variant) continue;
       const side = g.redUserId === userId ? 'red' : g.blackUserId === userId ? 'black' : null;
       if (!side) continue;
       total++;
@@ -388,55 +423,62 @@ export class MemoryStore {
   // ------------------------------------------------------------------ xếp hạng Elo
 
   /** { rating, ratedGames, rank } của một tài khoản; rank là null nếu chưa có ván tính điểm. null nếu không có tài khoản. */
-  async getRating(userId) {
-    const u = this.users.get(userId);
-    if (!u) return null;
-    const rank = u.ratedGames === 0
-      ? null
-      : 1 + [...this.users.values()].filter((x) => x.ratedGames > 0 && x.rating > u.rating).length;
-    return { rating: u.rating, ratedGames: u.ratedGames, rank };
+  async getRating(userId, variant = 'xiangqi') {
+    variant = normalizeRatingVariant(variant);
+    if (!this.users.has(userId)) return null;
+    const state = this._ratingState(userId, variant);
+    const rank = state.ratedGames === 0 ? null : 1 + [...this.users.keys()].filter((id) => {
+      const other = this._ratingState(id, variant, false);
+      return other && other.ratedGames > 0 && other.rating > state.rating;
+    }).length;
+    return { rating: state.rating, ratedGames: state.ratedGames, rank };
   }
 
-  /**
-   * Bảng xếp hạng: chỉ người có ít nhất một ván tính điểm. Cùng điểm thì CÙNG hạng (hạng kiểu thi đấu: 1, 2, 2, 4).
-   * Trong cùng hạng: nhiều ván hơn đứng trước, rồi theo id.
-   */
-  async listLeaderboard({ limit = 50, offset = 0 } = {}) {
+  async listLeaderboard({ limit = 50, offset = 0, variant = 'xiangqi' } = {}) {
+    variant = normalizeRatingVariant(variant);
     const rated = [...this.users.values()]
-      .filter((u) => u.ratedGames > 0)
-      .sort((a, b) => b.rating - a.rating || b.ratedGames - a.ratedGames || (a.id < b.id ? -1 : 1));
-    return rated.slice(offset, offset + limit).map((u) => ({
-      rank: 1 + rated.filter((x) => x.rating > u.rating).length,
-      userId: u.id,
-      displayName: u.displayName,
-      avatarUrl: u.avatarUrl,
-      rating: u.rating,
-      ratedGames: u.ratedGames,
+      .map((u) => ({ user: u, state: this._ratingState(u.id, variant, false) }))
+      .filter(({ state }) => state && state.ratedGames > 0)
+      .sort((a, b) => b.state.rating - a.state.rating || b.state.ratedGames - a.state.ratedGames || (a.user.id < b.user.id ? -1 : 1));
+    return rated.slice(offset, offset + limit).map(({ user, state }) => ({
+      rank: 1 + rated.filter((x) => x.state.rating > state.rating).length,
+      userId: user.id,
+      displayName: user.displayName,
+      avatarUrl: user.avatarUrl,
+      rating: state.rating,
+      ratedGames: state.ratedGames,
     }));
   }
 
   /** Tính lại toàn bộ Elo từ lịch sử ván (theo thứ tự thời gian). Dùng để vá dữ liệu hoặc áp Elo cho ván cũ. */
   async rebuildRatings() {
+    this.ratings.clear();
     for (const u of this.users.values()) {
       u.rating = DEFAULT_RATING;
       u.ratedGames = 0;
+      this._ratingState(u.id, 'xiangqi');
     }
     let rated = 0;
     const games = [...this.games.values()].sort((a, b) => a.endedAt - b.endedAt || (a.id < b.id ? -1 : 1));
     for (const g of games) {
-      Object.assign(g, {
-        rated: false, redRatingBefore: null, redRatingAfter: null, blackRatingBefore: null, blackRatingAfter: null,
-      });
+      Object.assign(g, { rated: false, redRatingBefore: null, redRatingAfter: null, blackRatingBefore: null, blackRatingAfter: null });
       const red = this.users.get(g.redUserId);
       const black = this.users.get(g.blackUserId);
       if (!red || !black || !isRatedGame(g, this.ratedMinMoves)) continue;
+      const variant = normalizeRatingVariant(g.variant ?? 'xiangqi');
+      const rs = this._ratingState(red.id, variant);
+      const bs = this._ratingState(black.id, variant);
       const r = computeRatings(
-        { rating: red.rating, games: red.ratedGames },
-        { rating: black.rating, games: black.ratedGames },
+        { rating: rs.rating, games: rs.ratedGames },
+        { rating: bs.rating, games: bs.ratedGames },
         g.result,
       );
-      red.rating = r.red.after; red.ratedGames += 1;
-      black.rating = r.black.after; black.ratedGames += 1;
+      rs.rating = r.red.after; rs.ratedGames += 1;
+      bs.rating = r.black.after; bs.ratedGames += 1;
+      if (variant === 'xiangqi') {
+        red.rating = rs.rating; red.ratedGames = rs.ratedGames;
+        black.rating = bs.rating; black.ratedGames = bs.ratedGames;
+      }
       Object.assign(g, {
         rated: true,
         redRatingBefore: r.red.before, redRatingAfter: r.red.after,

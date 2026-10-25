@@ -464,7 +464,7 @@ for (const impl of impls) {
           assert.ok(tables.includes(t), `thiếu bảng ${t}`);
         }
         const done = (await store.pool.query('SELECT name FROM schema_migrations')).rows.map((r) => r.name);
-        assert.deepEqual(done, ['001_init.sql', '002_ratings.sql', '003_recovery_email.sql']);
+        assert.deepEqual(done, ['001_init.sql', '002_ratings.sql', '003_recovery_email.sql', '004_jieqi.sql', '005_secure_jieqi_seed.sql']);
       });
 
       test('PostgreSQL: chỉ lưu BĂM của token, không lưu token gốc hay mật khẩu gốc', async () => {

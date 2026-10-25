@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "variant": "jieqi",
+  "contract": {
+    "seed": "uint32",
+    "prng": "mulberry32",
+    "randomIndex": "floor(nextUint32 / 4294967296 * bound)",
+    "shuffle": "fisher-yates-descending",
+    "sideOrder": ["black", "red"],
+    "poolOrder": ["advisor", "advisor", "elephant", "elephant", "horse", "horse", "chariot", "chariot", "cannon", "cannon", "soldier", "soldier", "soldier", "soldier", "soldier"],
+    "slotOrder": "back-rank-left-to-right-without-general, cannon-left-right, soldiers-left-to-right",
+    "opaqueId": "jq-{b|r}-{slot 00..15}; 15 is the face-up general",
+    "boardEntry": "{at:[col,row],id,side,type,roleType,faceDown}; type is internal and MUST be omitted from redacted wire pieces"
+  },
+  "prngVectors": [
+    {"seed": 0, "uint32": [1144304738, 1416247, 958946056, 627933444, 2007157716]},
+    {"seed": 1, "uint32": [2693262067, 11749833, 2265367787, 4213581821, 4159151403]},
+    {"seed": 4294967295, "uint32": [3850105811, 813802916, 3073704848, 4054706436, 3630262831]},
+    {"seed": 305419896, "uint32": [455919406, 4042750857, 4036713555, 1004527575, 3885174651]}
+  ],
+  "initialPositionVectors": [
+    {
+      "seed": 0,
+      "blackTypesBySlot": ["horse", "chariot", "soldier", "soldier", "soldier", "chariot", "soldier", "cannon", "cannon", "soldier", "horse", "advisor", "elephant", "advisor", "elephant"],
+      "redTypesBySlot": ["soldier", "horse", "soldier", "horse", "elephant", "advisor", "cannon", "soldier", "elephant", "advisor", "chariot", "chariot", "soldier", "cannon", "soldier"]
+    },
+    {
+      "seed": 1,
+      "blackTypesBySlot": ["elephant", "horse", "soldier", "advisor", "soldier", "chariot", "soldier", "cannon", "horse", "elephant", "soldier", "soldier", "chariot", "advisor", "cannon"],
+      "redTypesBySlot": ["cannon", "soldier", "soldier", "soldier", "horse", "cannon", "soldier", "advisor", "soldier", "chariot", "horse", "advisor", "chariot", "elephant", "elephant"]
+    },
+    {
+      "seed": 305419896,
+      "blackTypesBySlot": ["advisor", "elephant", "horse", "horse", "chariot", "soldier", "soldier", "cannon", "soldier", "chariot", "cannon", "elephant", "soldier", "soldier", "advisor"],
+      "redTypesBySlot": ["soldier", "chariot", "advisor", "advisor", "cannon", "cannon", "chariot", "soldier", "soldier", "soldier", "soldier", "elephant", "horse", "horse", "elephant"]
+    }
+  ],
+  "ruleVectors": [
+    {
+      "name": "face-down chariot role",
+      "piece": {"id": "jq-r-00", "side": "red", "type": "soldier", "roleType": "chariot", "faceDown": true},
+      "from": [4, 5],
+      "occupied": [],
+      "expectedPseudo": [[5, 5], [6, 5], [7, 5], [8, 5], [3, 5], [2, 5], [1, 5], [0, 5], [4, 6], [4, 7], [4, 8], [4, 9], [4, 4], [4, 3], [4, 2], [4, 1], [4, 0]]
+    },
+    {
+      "name": "face-down horse role with blocked leg",
+      "piece": {"id": "jq-r-01", "side": "red", "type": "cannon", "roleType": "horse", "faceDown": true},
+      "from": [4, 5],
+      "occupied": [{"at": [4, 4], "side": "red", "type": "soldier"}],
+      "expectedExcluded": [[3, 3], [5, 3]]
+    },
+    {
+      "name": "face-up piece ignores role and matches Xiangqi",
+      "piece": {"id": "jq-r-02", "side": "red", "type": "horse", "roleType": "soldier", "faceDown": false},
+      "from": [4, 5],
+      "occupied": [],
+      "expectedPseudo": [[6, 6], [6, 4], [2, 6], [2, 4], [5, 7], [3, 7], [5, 3], [3, 3]]
+    },
+    {
+      "name": "jieqi revealed advisor moves diagonally outside the palace",
+      "piece": {"id": "jq-r-06", "side": "red", "type": "advisor", "roleType": "chariot", "faceDown": false},
+      "from": [0, 5],
+      "occupied": [],
+      "expectedPseudo": [[1, 6], [1, 4]]
+    },
+    {
+      "name": "jieqi revealed elephant crosses the river, elephant-eye still blocks",
+      "piece": {"id": "jq-r-07", "side": "red", "type": "elephant", "roleType": "chariot", "faceDown": false},
+      "from": [4, 2],
+      "occupied": [{"at": [5, 3], "side": "black", "type": "soldier"}],
+      "expectedPseudo": [[6, 0], [2, 4], [2, 0]]
+    }
+  ],
+  "gameVectors": [
+    {
+      "name": "atomic reveal creates check and undo restores cover",
+      "turn": "red",
+      "board": [
+        {"at": [5, 9], "id": "jq-r-15", "side": "red", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [3, 0], "id": "jq-b-15", "side": "black", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [4, 4], "id": "jq-r-03", "side": "red", "type": "chariot", "roleType": "horse", "faceDown": true}
+      ],
+      "move": [[4, 4], [3, 2]],
+      "expected": {"legal": true, "revealed": "chariot", "givesCheck": true, "isCheck": true, "faceDownAtTo": false, "repetition": 1, "undo": true, "faceDownAtFromAfterUndo": true}
+    },
+    {
+      "name": "capture face-down metadata and undo",
+      "turn": "red",
+      "board": [
+        {"at": [3, 9], "id": "jq-r-15", "side": "red", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [5, 0], "id": "jq-b-15", "side": "black", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [0, 5], "id": "jq-r-04", "side": "red", "type": "horse", "roleType": "chariot", "faceDown": true},
+        {"at": [0, 4], "id": "jq-b-10", "side": "black", "type": "cannon", "roleType": "soldier", "faceDown": true}
+      ],
+      "move": [[0, 5], [0, 4]],
+      "expected": {"legal": true, "revealed": "horse", "capturedType": "cannon", "capturedWasFaceDown": true, "faceDownAtTo": false, "repetition": 1, "undo": true, "faceDownAtFromAfterUndo": true, "capturedRestoredFaceDown": true}
+    },
+    {
+      "name": "general-facing rejects horizontal blocker move",
+      "turn": "red",
+      "board": [
+        {"at": [4, 9], "id": "jq-r-15", "side": "red", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [4, 0], "id": "jq-b-15", "side": "black", "type": "general", "roleType": "general", "faceDown": false},
+        {"at": [4, 5], "id": "jq-r-05", "side": "red", "type": "soldier", "roleType": "chariot", "faceDown": true}
+      ],
+      "move": [[4, 5], [5, 5]],
+      "expected": {"legal": false}
+    }
+  ],
+  "sequenceVectors": [
+    {
+      "name": "Xiangqi third repetition remains compatible",
+      "initial": "xiangqi",
+      "moves": [[[1, 9], [2, 7]], [[1, 0], [2, 2]], [[2, 7], [1, 9]], [[2, 2], [1, 0]], [[1, 9], [2, 7]], [[1, 0], [2, 2]], [[2, 7], [1, 9]], [[2, 2], [1, 0]]],
+      "expected": {"result": "draw", "endReason": "repetition", "repetition": 3}
+    }
+  ]
+}

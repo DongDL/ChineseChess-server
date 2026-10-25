@@ -55,7 +55,7 @@ export function createApp({
     graceMs,
     authService,
     recorder,
-    ratingOf: async (userId) => (await store.getRating(userId))?.rating ?? null,
+    ratingOf: async (userId, variant = 'xiangqi') => (await store.getRating(userId, variant))?.rating ?? null,
     ...(clockLimits ? { clockLimits } : {}),
     ...gameServerOptions,
   });

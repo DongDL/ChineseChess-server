@@ -12,6 +12,13 @@ export const DEFAULT_RATING = 1500;
 export const MIN_RATING = 100;
 export const PROVISIONAL_GAMES = 30;
 export const RATED_MIN_MOVES = 6;
+export const RATING_VARIANTS = Object.freeze(['xiangqi', 'jieqi']);
+
+/** Chuẩn hoá biến thể của một thang Elo; mặc định giữ tương thích Xiangqi. */
+export function normalizeRatingVariant(value = 'xiangqi') {
+  if (!RATING_VARIANTS.includes(value)) throw new RangeError('bad_variant');
+  return value;
+}
 
 export function kFactor(rating, ratedGames) {
   if (ratedGames < PROVISIONAL_GAMES) return 40;

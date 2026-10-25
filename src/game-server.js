@@ -1,7 +1,7 @@
-import { createHash, randomInt } from 'node:crypto';
+import { createHash, randomBytes, randomInt } from 'node:crypto';
 import { DEFAULT_RATING } from './elo.js';
-import { SIDE, opposite } from './engine.js';
-import { Room, SIDES, generateRoomId } from './room.js';
+import { SIDE, VARIANT, opposite } from './engine.js';
+import { Room, SIDES, generateRoomId, normalizeVariant } from './room.js';
 import { DEFAULT_CLOCK_LIMITS, normalizeTimeControl, timeControlKey } from './clock.js';
 
 const ok = (extra = {}) => ({ ok: true, ...extra });
@@ -210,28 +210,46 @@ export class GameServer {
       });
     };
 
-    on('room:create', (p, reply) => this.createRoom(socket, p, reply));
-    on('room:join', (p, reply) => this.joinRoom(socket, p, reply));
-    on('room:leave', (p, reply) => this.leaveRoom(socket, reply));
-    on('room:spectate', (p, reply) => this.spectate(socket, p, reply));
-    on('chat:send', (p, reply) => this.handleChat(socket, p, reply));
-    on('queue:join', (p, reply) => this.joinQueue(socket, p, reply));
-    on('queue:leave', (p, reply) => {
-      this.removeFromQueue(playerId);
-      reply(ok());
+    on('room:create', (p, reply) => this.createRoom(socket, p, reply, VARIANT.XIANGQI));
+    on('room:join', (p, reply) => this.joinRoom(socket, p, reply, VARIANT.XIANGQI));
+    on('jieqi:create_room', (p, reply) => this.createRoom(socket, p, reply, VARIANT.JIEQI));
+    on('jieqi:join_room', (p, reply) => this.joinRoom(socket, p, reply, VARIANT.JIEQI));
+    // Lifecycle hiện tại bắt đầu ngay khi đủ hai ghế; ready là idempotent để client Jieqi xác nhận đã sẵn sàng.
+    on('jieqi:ready', (p, reply) => {
+      const r = this.roomOf(playerId);
+      if (!r || r.variant !== VARIANT.JIEQI) return reply(fail('not_in_jieqi_room'));
+      socket.emit('jieqi:state', r.toState(r.sideOf(playerId)));
+      return reply(ok({ state: r.toState(r.sideOf(playerId)) }));
     });
-    on('game:move', (p, reply) => this.handleMove(socket, p, reply));
-    on('game:resign', (p, reply) => this.handleResign(socket, reply));
-    on('game:draw:offer', (p, reply) => this.handleDrawOffer(socket, reply));
-    on('game:draw:respond', (p, reply) => this.handleDrawRespond(socket, p, reply));
-    on('game:sync', (p, reply) => {
+    on('room:leave', (p, reply) => this.leaveRoom(socket, reply));
+    on('room:spectate', (p, reply) => this.spectate(socket, p, reply, VARIANT.XIANGQI));
+    on('jieqi:spectate', (p, reply) => this.spectate(socket, p, reply, VARIANT.JIEQI));
+    on('chat:send', (p, reply) => this.handleChat(socket, p, reply));
+    on('queue:join', (p, reply) => this.joinQueue(socket, p, reply, VARIANT.XIANGQI));
+    on('jieqi:queue_join', (p, reply) => this.joinQueue(socket, p, reply, VARIANT.JIEQI));
+    const leaveQueue = (p, reply) => { this.removeFromQueue(playerId); reply(ok()); };
+    on('queue:leave', leaveQueue);
+    on('jieqi:queue_leave', leaveQueue);
+    on('game:move', (p, reply) => this.handleMove(socket, p, reply, VARIANT.XIANGQI));
+    on('jieqi:move', (p, reply) => this.handleMove(socket, p, reply, VARIANT.JIEQI));
+    on('game:resign', (p, reply) => this.handleResign(socket, reply, VARIANT.XIANGQI));
+    on('jieqi:resign', (p, reply) => this.handleResign(socket, reply, VARIANT.JIEQI));
+    on('game:draw:offer', (p, reply) => this.handleDrawOffer(socket, reply, VARIANT.XIANGQI));
+    on('jieqi:draw_offer', (p, reply) => this.handleDrawOffer(socket, reply, VARIANT.JIEQI));
+    on('game:draw:respond', (p, reply) => this.handleDrawRespond(socket, p, reply, VARIANT.XIANGQI));
+    on('jieqi:draw_respond', (p, reply) => this.handleDrawRespond(socket, p, reply, VARIANT.JIEQI));
+    const sync = (expected, reply) => {
       const r = this.roomOf(playerId);
       if (!r) {
         const watching = this.rooms.get(this.spectating.get(playerId));
-        return watching ? reply(ok({ state: watching.toState(null) })) : reply(fail('not_in_room'));
+        if (!watching || watching.variant !== expected) return reply(fail('not_in_room'));
+        return reply(ok({ state: watching.toState(null) }));
       }
+      if (r.variant !== expected) return reply(fail('wrong_variant'));
       return reply(ok({ state: r.toState(r.sideOf(playerId)) }));
-    });
+    };
+    on('game:sync', (p, reply) => sync(VARIANT.XIANGQI, reply));
+    on('jieqi:sync', (p, reply) => sync(VARIANT.JIEQI, reply));
 
     socket.on('disconnect', () => this.onDisconnect(socket));
   }
@@ -268,15 +286,18 @@ export class GameServer {
     room.timers[side] = null;
     room.seats[side].connected = true;
     socket.join(room.id);
-    socket.emit('session:resume', room.toState(side));
+    const state = room.toState(side);
+    socket.emit(room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'session:resume', state);
     if (room.chat.length > 0) socket.emit('chat:history', { roomId: room.id, messages: room.chat });
     socket.to(room.id).emit('opponent:status', { connected: true });
   }
 
   // ------------------------------------------------------------ phòng chơi
 
-  createRoom(socket, payload, reply) {
+  createRoom(socket, payload, reply, forcedVariant = null) {
     const { playerId, name, guest, userId } = socket.data;
+    let variant;
+    try { variant = normalizeVariant(forcedVariant ?? payload.variant); } catch { return reply(fail('bad_variant')); }
     this.leaveIfOver(playerId);
     if (this.roomOf(playerId)) return reply(fail('already_in_room'));
     let timeControl;
@@ -288,11 +309,12 @@ export class GameServer {
     this.removeFromQueue(playerId);
     this.stopSpectating(playerId);
 
-    const side =
-      payload.side === SIDE.RED || payload.side === SIDE.BLACK
-        ? payload.side
-        : SIDES[randomInt(2)];
-    const room = new Room(generateRoomId((id) => this.rooms.has(id)), timeControl);
+    const side = payload.side === SIDE.RED || payload.side === SIDE.BLACK ? payload.side : SIDES[randomInt(2)];
+    const room = new Room(generateRoomId((id) => this.rooms.has(id)), timeControl, {
+      variant,
+      // Seed do crypto của server sinh; client không bao giờ được quyền cung cấp.
+      seed: variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
+    });
     room.seat(side, playerId, name, guest, userId);
     this.rooms.set(room.id, room);
     this.playerRoom.set(playerId, room.id);
@@ -300,13 +322,13 @@ export class GameServer {
     return reply(ok({ roomId: room.id, side, state: room.toState(side) }));
   }
 
-  joinRoom(socket, payload, reply) {
+  joinRoom(socket, payload, reply, expectedVariant = null) {
     const { playerId, name, guest, userId } = socket.data;
     const roomId = String(payload.roomId ?? '').trim().toUpperCase();
     const room = this.rooms.get(roomId);
     if (!room) return reply(fail('room_not_found'));
+    if (expectedVariant && room.variant !== expectedVariant) return reply(fail('wrong_variant'));
 
-    // Đã ngồi sẵn trong phòng này (gửi lại join sau khi nối lại): coi như vào lại.
     const existing = room.sideOf(playerId);
     if (existing && this.playerRoom.get(playerId) === room.id) {
       this.resume(socket, room);
@@ -323,7 +345,7 @@ export class GameServer {
     room.seat(side, playerId, name, guest, userId);
     this.playerRoom.set(playerId, room.id);
     socket.join(room.id);
-    room.status = 'playing'; // đủ 2 người: ack trả về đã ở trạng thái đang chơi
+    room.status = 'playing';
     reply(ok({ roomId, side, state: room.toState(side) }));
     return this.startGame(room);
   }
@@ -334,9 +356,11 @@ export class GameServer {
    * Khách (không có Elo) ghép với khách; khách và tài khoản chỉ ghép với nhau khi một bên đã chờ quá guestAfterMs
    * (ván đó không tính điểm). Việc ghép lại được thử mỗi matchTickMs vì cửa sổ nới dần theo thời gian chờ.
    */
-  async joinQueue(socket, payload, reply) {
+  async joinQueue(socket, payload, reply, forcedVariant = null) {
     try {
       const { playerId, userId, guest } = socket.data;
+      let variant;
+      try { variant = normalizeVariant(forcedVariant ?? payload.variant); } catch { return reply(fail('bad_variant')); }
       this.leaveIfOver(playerId);
       if (this.roomOf(playerId)) return reply(fail('already_in_room'));
       let timeControl;
@@ -345,32 +369,33 @@ export class GameServer {
       } catch {
         return reply(fail('bad_time_control'));
       }
-      const key = timeControlKey(timeControl);
+      // Variant là một phần của khoá để hai hàng đợi tuyệt đối không ghép chéo.
+      const key = `${variant}:${timeControlKey(timeControl)}`;
       this.removeFromQueue(playerId);
 
-      let rating = null; // khách không có Elo
+      let rating = null;
       if (!guest) {
         rating = DEFAULT_RATING;
         if (userId && this.ratingOf) {
           try {
-            rating = (await this.ratingOf(userId)) ?? DEFAULT_RATING;
+            rating = (await this.ratingOf(userId, variant)) ?? DEFAULT_RATING;
           } catch (err) {
             console.error('[queue] không đọc được Elo, dùng điểm mặc định:', err.message);
           }
         }
       }
-      // Trong lúc chờ đọc Elo, trạng thái có thể đã đổi: kiểm tra lại.
       if (this.sockets.get(playerId) !== socket) return undefined;
       this.leaveIfOver(playerId);
       if (this.roomOf(playerId)) return reply(fail('already_in_room'));
       this.removeFromQueue(playerId);
       this.stopSpectating(playerId);
 
-      const entry = { playerId, key, timeControl, rating, joinedAt: this.now() };
+      const entry = { playerId, key, variant, timeControl, rating, joinedAt: this.now() };
       this.queue.push(entry);
       const room = this.matchEntry(entry);
-      if (!room) return reply(ok({ matched: false }));
-      reply(ok({ matched: true, roomId: room.id, side: room.sideOf(playerId) }));
+      const responseVariant = variant === VARIANT.JIEQI ? { variant } : {};
+      if (!room) return reply(ok({ matched: false, ...responseVariant }));
+      reply(ok({ matched: true, roomId: room.id, side: room.sideOf(playerId), ...responseVariant }));
       return this.announce(room);
     } catch (err) {
       console.error('[queue:join]', err);
@@ -424,7 +449,10 @@ export class GameServer {
     if (!best) return null;
     this.queue = this.queue.filter((e) => e !== entry && e !== best.other);
 
-    const room = new Room(generateRoomId((id) => this.rooms.has(id)), entry.timeControl);
+    const room = new Room(generateRoomId((id) => this.rooms.has(id)), entry.timeControl, {
+      variant: entry.variant,
+      seed: entry.variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
+    });
     const socks = [this.sockets.get(entry.playerId), this.sockets.get(best.other.playerId)];
     const [first, second] = randomInt(2) === 0 ? socks : [socks[1], socks[0]];
     room.seat(SIDE.RED, first.data.playerId, first.data.name, first.data.guest, first.data.userId);
@@ -440,7 +468,8 @@ export class GameServer {
   /** Báo cho hai người đã được ghép rồi bắt đầu ván. */
   announce(room) {
     for (const side of SIDES) {
-      this.sockets.get(room.seats[side].playerId)?.emit('match:found', { roomId: room.id, side });
+      const event = room.variant === VARIANT.JIEQI ? 'jieqi:match_found' : 'match:found';
+      this.sockets.get(room.seats[side].playerId)?.emit(event, { roomId: room.id, side, variant: room.variant });
     }
     this.startGame(room);
   }
@@ -449,7 +478,7 @@ export class GameServer {
   matchTick() {
     this.purgeQueue();
     for (const entry of [...this.queue]) {
-      if (!this.queue.includes(entry)) continue; // đã được ghép trong vòng lặp này
+      if (!this.queue.includes(entry)) continue;
       const room = this.matchEntry(entry);
       if (room) this.announce(room);
     }
@@ -458,14 +487,12 @@ export class GameServer {
   startGame(room) {
     room.status = 'playing';
     room.startedAt = Date.now();
-    room.clock?.start(SIDE.RED); // Đỏ đi trước: đồng hồ Đỏ bắt đầu chạy
+    room.clock?.start(SIDE.RED);
     this.scheduleFlag(room);
-    for (const side of SIDES) {
-      this.sockets.get(room.seats[side].playerId)?.emit('game:start', room.toState(side));
-    }
-    // Khán giả đã vào xem phòng chờ: gửi thế cờ khai cuộc (họ không có ghế nên không nhận game:start).
+    const playerEvent = room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'game:start';
+    for (const side of SIDES) this.sockets.get(room.seats[side].playerId)?.emit(playerEvent, room.toState(side));
     for (const pid of room.spectators.keys()) {
-      this.sockets.get(pid)?.emit('spectate:state', room.toState(null));
+      this.sockets.get(pid)?.emit(room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'spectate:state', room.toState(null));
     }
   }
 
@@ -534,11 +561,12 @@ export class GameServer {
    * Xem một phòng bằng mã phòng (ai biết mã là xem được; app công bố mã tuỳ người chơi). Khán giả nhận mọi sự kiện của
    * phòng (nước đi, kết quả, chat) nhưng không đi quân được. Khách xem được nhưng không chat được (cần tài khoản).
    */
-  spectate(socket, payload, reply) {
+  spectate(socket, payload, reply, expectedVariant = null) {
     const { playerId, name, guest, userId } = socket.data;
     const roomId = String(payload.roomId ?? '').trim().toUpperCase();
     const room = this.rooms.get(roomId);
     if (!room) return reply(fail('room_not_found'));
+    if (expectedVariant && room.variant !== expectedVariant) return reply(fail('wrong_variant'));
     this.leaveIfOver(playerId);
     if (this.roomOf(playerId)) return reply(fail('already_in_room'));
     const already = this.spectating.get(playerId) === roomId;
@@ -600,23 +628,26 @@ export class GameServer {
   // ----------------------------------------------------------- ván cờ
 
   /** Lấy phòng đang chơi + phe của người gửi, hoặc trả lỗi. */
-  playing(socket, reply) {
+  playing(socket, reply, expectedVariant = null) {
     const { playerId } = socket.data;
     const room = this.roomOf(playerId);
     if (!room || room.status !== 'playing') {
       reply(fail('not_playing'));
       return null;
     }
+    if (expectedVariant && room.variant !== expectedVariant) {
+      reply(fail('wrong_variant'));
+      return null;
+    }
     return { room, side: room.sideOf(playerId) };
   }
 
-  handleMove(socket, payload, reply) {
-    const ctx = this.playing(socket, reply);
+  handleMove(socket, payload, reply, expectedVariant = null) {
+    const ctx = this.playing(socket, reply, expectedVariant);
     if (!ctx) return;
     const { room, side } = ctx;
     if (room.game.turn !== side) return reply(fail('not_your_turn'));
 
-    // Nước đi đến muộn sau khi đã hết giờ: xử thua ngay, không nhận nước đi.
     if (room.clock) {
       room.clock.tick();
       if (room.clock.isExpired(side)) {
@@ -628,59 +659,69 @@ export class GameServer {
     const from = parsePos(payload.from);
     const to = parsePos(payload.to);
     if (!from || !to) return reply(fail('bad_payload'));
-
     const record = room.game.play(from, to);
     if (!record) return reply(fail('illegal_move'));
 
     room.moveTimes.push(Date.now() - room.startedAt);
-
-    // Nước hợp lệ: trừ giờ, cộng thêm giờ, chuyển đồng hồ sang đối thủ.
     room.clock?.press();
     this.scheduleFlag(room);
-
     room.drawOfferFrom = null;
-    this.io.to(room.id).emit('game:move', {
+
+    const common = {
       roomId: room.id,
       moveNumber: room.game.history.length,
-      from: record.from,
-      to: record.to,
-      pieceId: record.piece.id,
-      capturedId: record.captured?.id ?? null,
-      givesCheck: record.givesCheck,
       turn: room.game.turn,
       isCheck: room.game.isCheck,
       repetitions: room.game.repetitionCount,
       clock: room.clock ? room.clock.snapshot() : null,
-    });
+    };
+    if (room.variant === VARIANT.JIEQI) {
+      // Không broadcast một payload chung: loại quân úp bị ăn chỉ tới người ăn.
+      for (const viewerSide of SIDES) {
+        const pid = room.seats[viewerSide]?.playerId;
+        this.sockets.get(pid)?.emit('jieqi:moved', { ...room.moveForViewer(record, viewerSide, common.moveNumber), ...common });
+      }
+      for (const pid of room.spectators.keys()) {
+        this.sockets.get(pid)?.emit('jieqi:moved', { ...room.moveForViewer(record, null, common.moveNumber), ...common });
+      }
+    } else {
+      this.io.to(room.id).emit('game:move', {
+        ...common,
+        from: record.from,
+        to: record.to,
+        pieceId: record.piece.id,
+        capturedId: record.captured?.id ?? null,
+        givesCheck: record.givesCheck,
+      });
+    }
     reply(ok());
     if (room.game.isOver) this.finish(room, room.game.result, room.game.endReason);
     return undefined;
   }
 
-  handleResign(socket, reply) {
-    const ctx = this.playing(socket, reply);
+  handleResign(socket, reply, expectedVariant = null) {
+    const ctx = this.playing(socket, reply, expectedVariant);
     if (!ctx) return;
     this.finish(ctx.room, opposite(ctx.side), 'resign');
     reply(ok());
   }
 
-  handleDrawOffer(socket, reply) {
-    const ctx = this.playing(socket, reply);
+  handleDrawOffer(socket, reply, expectedVariant = null) {
+    const ctx = this.playing(socket, reply, expectedVariant);
     if (!ctx) return;
     const { room, side } = ctx;
     if (room.drawOfferFrom === side) return reply(fail('already_offered'));
     if (room.drawOfferFrom === opposite(side)) {
-      // Cả hai cùng xin hoà: đồng ý luôn.
       this.finish(room, 'draw', 'agreement');
       return reply(ok());
     }
     room.drawOfferFrom = side;
-    this.io.to(room.id).emit('game:draw:offered', { roomId: room.id, from: side });
+    this.io.to(room.id).emit(room.variant === VARIANT.JIEQI ? 'jieqi:draw_offered' : 'game:draw:offered', { roomId: room.id, from: side });
     return reply(ok());
   }
 
-  handleDrawRespond(socket, payload, reply) {
-    const ctx = this.playing(socket, reply);
+  handleDrawRespond(socket, payload, reply, expectedVariant = null) {
+    const ctx = this.playing(socket, reply, expectedVariant);
     if (!ctx) return;
     const { room, side } = ctx;
     if (room.drawOfferFrom !== opposite(side)) return reply(fail('no_draw_offer'));
@@ -688,7 +729,7 @@ export class GameServer {
       this.finish(room, 'draw', 'agreement');
     } else {
       room.drawOfferFrom = null;
-      this.io.to(room.id).emit('game:draw:declined', { roomId: room.id, by: side });
+      this.io.to(room.id).emit(room.variant === VARIANT.JIEQI ? 'jieqi:draw_declined' : 'game:draw:declined', { roomId: room.id, by: side });
     }
     return reply(ok());
   }
@@ -714,18 +755,28 @@ export class GameServer {
       this.io.to(room.id).emit('game:rating', {
         roomId: room.id,
         gameId: room.gameId,
+        ...(room.variant === VARIANT.JIEQI ? { variant: room.variant } : {}),
         rated: r !== null,
         red: r?.red ?? null,
         black: r?.black ?? null,
       });
     });
-    this.io.to(room.id).emit('game:over', {
+    const over = {
       roomId: room.id,
       gameId: room.gameId,
       result: room.game.result,
       reason: room.game.endReason,
       clock: room.clock ? room.clock.snapshot() : null,
-    });
+    };
+    if (room.variant === VARIANT.JIEQI) {
+      // Kết thúc ván không giải mật seed, bàn đầy đủ hay quân úp đã bị ăn.
+      this.io.to(room.id).emit('jieqi:game_over', {
+        ...over,
+        variant: room.variant,
+      });
+    } else {
+      this.io.to(room.id).emit('game:over', over);
+    }
   }
 
   /** Dọn phòng bị bỏ quên: chờ quá 30 phút, hoặc đã kết thúc quá 1 giờ. */

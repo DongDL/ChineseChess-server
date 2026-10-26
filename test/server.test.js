@@ -284,18 +284,20 @@ test('đồng hồ: Đỏ chạy ngay khi ván bắt đầu, đi xong được c
   const startA = waitFor(a, 'game:start');
   await emit(b, 'room:join', { roomId: created.roomId });
   const start = await startA;
-  assert.equal(start.clock.running, 'red');
+  // Đồng hồ chưa bắt đầu - chờ nước đi đầu tiên
+  assert.equal(start.clock.running, null);
   assert.equal(start.clock.incrementMs, 3_000);
-  assert.ok(start.clock.remainingMs.red <= 300_000 && start.clock.remainingMs.red > 299_000);
+  assert.equal(start.clock.remainingMs.red, 300_000);
   assert.equal(start.clock.remainingMs.black, 300_000);
 
-  await sleep(200); // Đỏ suy nghĩ 200ms
+  // Đỏ đi nước đầu tiên: đồng hồ bắt đầu chạy
+  await sleep(200); // Đỏ suy nghĩ 200ms (nhưng đồng hồ chưa bắt đầu nên không mất giờ)
   const moveA = waitFor(a, 'game:move');
   assert.equal((await emit(a, 'game:move', { from: P(1, 7), to: P(4, 7) })).ok, true);
   let ev = await moveA;
   assert.equal(ev.clock.running, 'black');
-  // Đỏ mất ~200ms nhưng được cộng 3000ms
-  assert.ok(ev.clock.remainingMs.red > 300_000 + 3_000 - 1_000 && ev.clock.remainingMs.red < 300_000 + 3_000);
+  // Đỏ chưa mất giờ (đồng hồ bắt đầu khi đi) nhưng được cộng 3000ms
+  assert.ok(ev.clock.remainingMs.red >= 300_000 + 3_000 - 100);
 
   await waitFor(b, 'game:move'); // Đen cũng nhận sự kiện nước đi của Đỏ: lấy ra khỏi hàng đợi
   await sleep(200); // Đen suy nghĩ 200ms: đồng hồ Đen phải đang chạy
@@ -310,16 +312,21 @@ test('hết giờ: server xử thua bên hết giờ, cả hai nhận game:over'
   const a = await connect('player-A-102');
   const b = await connect('player-B-102');
   await startRoom(a, b, { baseMs: 300, incrementMs: 0 });
+  
+  // Đỏ phải đi nước đầu tiên để bắt đầu đồng hồ
+  await emit(a, 'game:move', { from: P(1, 7), to: P(4, 7) });
+  await waitFor(b, 'game:move');
+  
   const overA = waitFor(a, 'game:over', 3000);
   const overB = waitFor(b, 'game:over', 3000);
-  const [oa, ob] = await Promise.all([overA, overB]); // Đỏ không đi nên hết giờ
-  assert.equal(oa.result, 'black');
+  const [oa, ob] = await Promise.all([overA, overB]); // Đen không đi nên hết giờ
+  assert.equal(oa.result, 'red'); // Đỏ thắng vì Đen hết giờ
   assert.equal(oa.reason, 'timeout');
   assert.deepEqual(oa, ob);
-  assert.equal(oa.clock.remainingMs.red, 0);
+  assert.equal(oa.clock.remainingMs.black, 0);
   assert.equal(oa.clock.running, null);
 
-  const r = await emit(a, 'game:move', { from: P(1, 7), to: P(4, 7) });
+  const r = await emit(a, 'game:move', { from: P(2, 7), to: P(5, 7) });
   assert.equal(r.error, 'not_playing');
 });
 

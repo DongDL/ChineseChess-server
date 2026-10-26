@@ -487,7 +487,8 @@ export class GameServer {
   startGame(room) {
     room.status = 'playing';
     room.startedAt = Date.now();
-    room.clock?.start(SIDE.RED);
+    // KHÔNG bắt đầu đồng hồ ngay - chờ nước đi đầu tiên
+    // room.clock?.start(SIDE.RED);
     this.scheduleFlag(room);
     const playerEvent = room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'game:start';
     for (const side of SIDES) this.sockets.get(room.seats[side].playerId)?.emit(playerEvent, room.toState(side));
@@ -647,6 +648,12 @@ export class GameServer {
     if (!ctx) return;
     const { room, side } = ctx;
     if (room.game.turn !== side) return reply(fail('not_your_turn'));
+
+    // Nước đi đầu tiên: bắt đầu đồng hồ
+    const isFirstMove = room.game.history.length === 0;
+    if (isFirstMove && room.clock) {
+      room.clock.start(side);
+    }
 
     if (room.clock) {
       room.clock.tick();

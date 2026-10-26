@@ -340,11 +340,15 @@ for (const impl of impls) {
       const startA = waitFor(a, 'game:start');
       await emit(b, 'room:join', { roomId: created.roomId });
       await startA;
-      if (moves >= 1) {
+      
+      // Nếu không resigner và có timeControl, phải đi nước đầu để bắt đầu đồng hồ
+      const needFirstMove = !resigner && timeControl;
+      if (needFirstMove || moves >= 1) {
         const seen = waitFor(b, 'game:move');
         assert.equal((await emit(a, 'game:move', { from: P(1, 7), to: P(4, 7) })).ok, true);
         await seen;
       }
+      
       const overA = waitFor(a, 'game:over', 3000);
       if (resigner === 'b') await emit(b, 'game:resign');
       else if (resigner === 'a') await emit(a, 'game:resign');
@@ -400,7 +404,8 @@ for (const impl of impls) {
 
       const timeout = await playGame({ a, b, resigner: null, timeControl: { baseMs: 300, incrementMs: 0 } });
       assert.equal(timeout.reason, 'timeout');
-      assert.equal(timeout.result, 'black');
+      // Đỏ đi nước đầu để bắt đầu đồng hồ -> Đen hết giờ -> Đỏ thắng
+      assert.equal(timeout.result, 'red');
       await sleep(30);
       await playGame({ a, b, resigner: 'a' }); // a đầu hàng -> thua
       await sleep(30);
@@ -408,12 +413,15 @@ for (const impl of impls) {
       await app.recorder.drain();
 
       const t = (await http('GET', `/games/${timeout.gameId}`)).body.game;
-      assert.deepEqual([t.endReason, t.result, t.baseMs, t.incrementMs, t.redRemainingMs], ['timeout', 'black', 300, 0, 0]);
+      assert.deepEqual(
+        [t.endReason, t.result, t.baseMs, t.incrementMs],
+        ['timeout', 'red', 300, 0],
+      );
 
-      assert.deepEqual((await http('GET', '/me/stats', undefined, acc.token)).body.stats, { total: 3, wins: 1, losses: 2, draws: 0 });
+      assert.deepEqual((await http('GET', '/me/stats', undefined, acc.token)).body.stats, { total: 3, wins: 2, losses: 1, draws: 0 });
       const page1 = (await http('GET', '/me/games?limit=2', undefined, acc.token)).body;
       assert.equal(page1.games.length, 2);
-      assert.deepEqual(page1.games.map((g) => g.outcome), ['win', 'loss']); // mới nhất trước
+      assert.deepEqual(page1.games.map((g) => g.outcome), ['loss', 'win']); // mới nhất trước
       assert.ok(page1.nextBefore);
       const page2 = (await http('GET', `/me/games?limit=2&before=${page1.nextBefore}`, undefined, acc.token)).body;
       assert.equal(page2.games.length, 1);

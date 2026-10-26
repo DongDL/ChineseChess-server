@@ -1,4 +1,4 @@
-Set up this app on [Neon](https://console.neon.tech/).
+Set up this app on [Neon](https://console.neon.tech/) (Create DB).
 1. `npm i -g neon@latest`. If that fails, use `npx neon@latest` in place of `neon`.
    If a neon command opens a browser sign-in, tell me to finish it there. If that times out or fails, ask me to run `neon login`, then retry.
 2. In the project root:

@@ -330,6 +330,25 @@ test('hết giờ: server xử thua bên hết giờ, cả hai nhận game:over'
   assert.equal(r.error, 'not_playing');
 });
 
+test('giới hạn mỗi nước: quá hạn một nước thì bị xử thua dù còn nhiều tổng giờ', async () => {
+  const a = await connect('player-A-102b');
+  const b = await connect('player-B-102b');
+  // Tổng giờ nhiều (10 phút) nhưng mỗi nước chỉ 200ms: Đen không đi kịp sẽ thua.
+  await startRoom(a, b, { baseMs: 600_000, incrementMs: 0, perMoveMs: 200 });
+
+  await emit(a, 'game:move', { from: P(1, 7), to: P(4, 7) }); // Đỏ đi, đồng hồ sang Đen
+  await waitFor(b, 'game:move');
+
+  const overA = waitFor(a, 'game:over', 3000);
+  const overB = waitFor(b, 'game:over', 3000);
+  const [oa, ob] = await Promise.all([overA, overB]); // Đen quá hạn nước đi
+  assert.equal(oa.result, 'red'); // Đỏ thắng
+  assert.equal(oa.reason, 'timeout');
+  assert.deepEqual(oa, ob);
+  assert.equal(oa.clock.perMoveMs, 200);
+  assert.ok(oa.clock.remainingMs.black > 500_000, 'tổng giờ Đen vẫn còn nhiều, chỉ hết giờ nước đi');
+});
+
 test('cấu hình đồng hồ sai bị từ chối', async () => {
   const a = await connect('player-A-103');
   for (const timeControl of [{ baseMs: 5 }, { baseMs: 'x' }, 'abc', { baseMs: 60_000, incrementMs: -1 }]) {

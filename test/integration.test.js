@@ -4,7 +4,10 @@ import { createApp } from '../src/app.js';
 import { AuthService } from '../src/auth.js';
 import { OAuthService } from '../src/oauth.js';
 import { GameRecorder } from '../src/recorder.js';
-import { facebookProvider, googleProvider, zaloProvider } from '../src/providers.js';
+import { generateKeyPairSync } from 'node:crypto';
+import {
+  appleProvider, facebookProvider, googleProvider, zaloProvider,
+} from '../src/providers.js';
 import { MemoryStore } from '../src/stores/memory.js';
 import { PgStore } from '../src/stores/pg.js';
 import { startMockProviders } from './helpers/mock-providers.js';
@@ -54,10 +57,19 @@ for (const impl of impls) {
       auth = new AuthService({
         store, scryptParams: FAST, log: quiet, limits: { registerPerIp: BIG, loginPerIp: BIG },
       });
+      // Khoá EC P-256 thật để server ký được client_secret của Apple (mock chỉ kiểm cấu trúc JWT, không kiểm chữ ký).
+      const { privateKey: applePem } = generateKeyPairSync('ec', {
+        namedCurve: 'P-256',
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+      });
       const providers = new Map([
         ['google', googleProvider({ clientId: 'gid', clientSecret: 'gsecret', urls: mockServer.urls('google') })],
         ['facebook', facebookProvider({ clientId: 'fid', clientSecret: 'fsecret', urls: mockServer.urls('facebook') })],
         ['zalo', zaloProvider({ clientId: 'zid', clientSecret: 'zsecret', urls: mockServer.urls('zalo') })],
+        ['apple', appleProvider({
+          clientId: 'app.cotuong.test', teamId: 'TEAMID1234', keyId: 'KEY123', privateKey: applePem, urls: mockServer.urls('apple'),
+        })],
       ]);
       oauth = new OAuthService({
         store, auth, providers, publicUrl: 'http://chua-biet', appRedirects: ['cotuong://auth'],
@@ -129,7 +141,7 @@ for (const impl of impls) {
 
     test('danh sách nhà cung cấp và kiểm tra yêu cầu bắt đầu đăng nhập', async () => {
       const list = await http('GET', '/auth/providers');
-      assert.deepEqual(list.body, { ok: true, providers: ['google', 'facebook', 'zalo'] });
+      assert.deepEqual(list.body, { ok: true, providers: ['google', 'facebook', 'zalo', 'apple'] });
 
       const post = (p, body, token) => http('POST', `/auth/oauth/${p}/start`, body, token);
       assert.deepEqual((await post('twitter', { appRedirect: 'cotuong://auth' })).body, { ok: false, error: 'provider_not_configured' });
@@ -159,8 +171,38 @@ for (const impl of impls) {
       const z = await urlOf('zalo');
       assert.equal(z.searchParams.get('app_id'), 'zid');
       assert.ok(z.searchParams.get('code_challenge'));
+
+      const a = await urlOf('apple');
+      assert.equal(a.searchParams.get('client_id'), 'app.cotuong.test');
+      assert.equal(a.searchParams.get('redirect_uri'), `${base}/auth/oauth/apple/callback`);
+      assert.equal(a.searchParams.get('response_type'), 'code');
+      assert.equal(a.searchParams.get('scope'), 'email');
+      assert.equal(a.searchParams.get('code_challenge'), null, 'Apple không dùng PKCE ở luồng này');
+      assert.ok(a.searchParams.get('state').length >= 40);
+
       // Mỗi lần bắt đầu có state và PKCE khác nhau
       assert.notEqual((await urlOf('google')).searchParams.get('state'), g.searchParams.get('state'));
+    });
+
+    test('đăng nhập bằng Apple: định danh theo id_token (sub), lấy email, tên dùng mặc định, không có ảnh', async () => {
+      mock.profiles.apple.id = uniq('apple-sub');
+      const first = await socialLogin('apple');
+      assert.equal(first.user.username, null);
+      assert.equal(first.user.displayName, 'Người chơi'); // Apple không trả tên trong id_token
+      assert.equal(first.user.avatarUrl, null);
+      assert.ok(first.token.length >= 40);
+
+      const me = await http('GET', '/auth/me', undefined, first.token);
+      assert.deepEqual(me.body.user.providers, ['apple']);
+      assert.equal(me.body.user.hasPassword, false);
+      assert.equal((await store.findUserById(first.user.id)).email, mock.profiles.apple.email);
+
+      // Đăng nhập lại cùng sub -> cùng tài khoản; sub khác -> tài khoản khác
+      const second = await socialLogin('apple');
+      assert.equal(second.user.id, first.user.id);
+      mock.profiles.apple.id = uniq('apple-sub2');
+      const other = await socialLogin('apple');
+      assert.notEqual(other.user.id, first.user.id);
     });
 
     for (const [provider, profileKey] of [['google', 'google'], ['facebook', 'facebook'], ['zalo', 'zalo']]) {

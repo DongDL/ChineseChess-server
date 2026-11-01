@@ -116,7 +116,9 @@ export class Room {
       seedHash: this.seedHash,
       red: seat(this.seats.red),
       black: seat(this.seats.black),
-      timeControl: this.clock ? { baseMs: this.clock.baseMs, incrementMs: this.clock.incrementMs } : null,
+      timeControl: this.clock
+        ? { baseMs: this.clock.baseMs, incrementMs: this.clock.incrementMs, perMoveMs: this.clock.perMoveMs }
+        : null,
       result: g.result,
       endReason: g.endReason,
       moves: g.history.map((r, i) => ({

@@ -14,9 +14,13 @@ const CLIENTS = {
   google: { id: 'gid', secret: 'gsecret' },
   facebook: { id: 'fid', secret: 'fsecret' },
   zalo: { id: 'zid', secret: 'zsecret' },
+  // Apple: secret là JWT ES256 server tự ký -> ở đây chỉ kiểm cấu trúc, không kiểm chữ ký.
+  apple: { id: 'app.cotuong.test' },
 };
 
 const b64url = (buf) => Buffer.from(buf).toString('base64url');
+const b64urlJson = (obj) => Buffer.from(JSON.stringify(obj)).toString('base64url');
+const unsignedJwt = (payload) => `${b64urlJson({ alg: 'none' })}.${b64urlJson(payload)}.`;
 
 function readForm(req) {
   return new Promise((resolve) => {
@@ -35,6 +39,7 @@ export async function startMockProviders() {
       google: { id: 'g-100', name: 'Gờ Người Dùng', email: 'g@example.com', emailVerified: true, picture: 'https://img.example/g.png' },
       facebook: { id: 'f-100', name: 'Ép Người Dùng', email: 'f@example.com', picture: 'https://img.example/f.png' },
       zalo: { id: 'z-100', name: 'Zờ Người Dùng', picture: 'https://img.example/z.png' },
+      apple: { id: 'a-100', email: 'a@privaterelay.appleid.com', emailVerified: true },
     },
     denyNext: false, // lần cấp quyền kế tiếp: người dùng bấm "Từ chối"
     failTokenNext: false, // lần đổi mã kế tiếp: nhà cung cấp báo lỗi
@@ -57,7 +62,7 @@ export async function startMockProviders() {
     // ---- 1. Trang cấp quyền: chuyển hướng về callback của server mình kèm mã ----
     if (['authorize', 'dialog/oauth', 'permission'].includes(action)) {
       if ((q.get('client_id') ?? q.get('app_id')) !== cfg.id) return json(400, { error: 'bad_client' });
-      const needsPkce = provider !== 'facebook';
+      const needsPkce = provider === 'google' || provider === 'zalo';
       if (needsPkce && (!q.get('code_challenge') || q.get('code_challenge_method') !== 'S256')) {
         return json(400, { error: 'pkce_required' });
       }
@@ -85,7 +90,7 @@ export async function startMockProviders() {
       return res.end();
     }
 
-    // ---- 2. Đổi mã lấy access token ----
+    // ---- 2. Đổi mã lấy access token (Apple trả id_token) ----
     if (['token', 'oauth/access_token', 'access_token'].includes(action)) {
       let p;
       let secret;
@@ -99,7 +104,17 @@ export async function startMockProviders() {
         secret = provider === 'zalo' ? req.headers.secret_key : p.get('client_secret');
       }
       if ((p.get('client_id') ?? p.get('app_id')) !== cfg.id) return json(400, { error: 'bad_client' });
-      if (secret !== cfg.secret) return json(401, { error: 'bad_secret' });
+      if (provider === 'apple') {
+        // Apple: client_secret là JWT ES256. Kiểm cấu trúc + các claim bắt buộc (không kiểm chữ ký ở mock).
+        const claims = (() => {
+          try { return JSON.parse(Buffer.from(String(secret).split('.')[1] ?? '', 'base64url').toString('utf8')); } catch { return null; }
+        })();
+        if (!claims || claims.iss?.length !== 10 || claims.sub !== cfg.id || claims.aud !== 'https://appleid.apple.com') {
+          return json(401, { error: 'bad_apple_secret' });
+        }
+      } else if (secret !== cfg.secret) {
+        return json(401, { error: 'bad_secret' });
+      }
       if (provider !== 'facebook' && p.get('grant_type') !== 'authorization_code') return json(400, { error: 'bad_grant_type' });
       if (mock.failTokenNext) {
         mock.failTokenNext = false;
@@ -109,11 +124,21 @@ export async function startMockProviders() {
       codes.delete(p.get('code')); // mã uỷ quyền chỉ dùng được một lần
       if (!entry || entry.provider !== provider) return json(400, { error: 'invalid_code' });
       if (provider !== 'zalo' && entry.redirectUri !== p.get('redirect_uri')) return json(400, { error: 'redirect_mismatch' });
-      if (provider !== 'facebook') {
+      if (provider === 'google' || provider === 'zalo') {
         const verifier = p.get('code_verifier') ?? '';
         if (b64url(createHash('sha256').update(verifier).digest()) !== entry.challenge) {
           return json(400, { error: 'pkce_mismatch' });
         }
+      }
+      if (provider === 'apple') {
+        const pr = mock.profiles.apple;
+        const idToken = unsignedJwt({
+          iss: 'https://appleid.apple.com',
+          sub: pr.id,
+          email: pr.email,
+          email_verified: pr.emailVerified,
+        });
+        return json(200, { access_token: `at_${randomBytes(10).toString('hex')}`, token_type: 'Bearer', expires_in: 3600, id_token: idToken });
       }
       const access = `at_${randomBytes(10).toString('hex')}`;
       tokens.set(access, provider);
@@ -148,6 +173,7 @@ export async function startMockProviders() {
       google: { authorize: `${base}/google/authorize`, token: `${base}/google/token`, userinfo: `${base}/google/userinfo` },
       facebook: { authorize: `${base}/facebook/dialog/oauth`, token: `${base}/facebook/oauth/access_token`, me: `${base}/facebook/me` },
       zalo: { authorize: `${base}/zalo/permission`, token: `${base}/zalo/access_token`, me: `${base}/zalo/me` },
+      apple: { authorize: `${base}/apple/authorize`, token: `${base}/apple/token` },
     })[provider],
     close: () => new Promise((resolve) => server.close(resolve)),
   };

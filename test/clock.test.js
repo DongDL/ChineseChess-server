@@ -76,8 +76,11 @@ test('normalizeTimeControl: chấp nhận cấu hình hợp lệ, từ chối c�
   assert.equal(normalizeTimeControl(undefined), null);
   assert.equal(normalizeTimeControl(null), null);
   assert.deepEqual(normalizeTimeControl({ baseMs: 600_000, incrementMs: 5_000 }),
-    { baseMs: 600_000, incrementMs: 5_000 });
-  assert.deepEqual(normalizeTimeControl({ baseMs: 300_000 }), { baseMs: 300_000, incrementMs: 0 });
+    { baseMs: 600_000, incrementMs: 5_000, perMoveMs: 0 });
+  assert.deepEqual(normalizeTimeControl({ baseMs: 300_000 }), { baseMs: 300_000, incrementMs: 0, perMoveMs: 0 });
+  // Giới hạn mỗi nước
+  assert.deepEqual(normalizeTimeControl({ baseMs: 300_000, perMoveMs: 30_000 }),
+    { baseMs: 300_000, incrementMs: 0, perMoveMs: 30_000 });
 
   const bad = [
     'abc', 5, {}, { baseMs: 'x' }, { baseMs: 1.5 }, { baseMs: 1_000 }, // dưới mức tối thiểu
@@ -85,17 +88,57 @@ test('normalizeTimeControl: chấp nhận cấu hình hợp lệ, từ chối c�
     { baseMs: 60_000, incrementMs: -1 },
     { baseMs: 60_000, incrementMs: DEFAULT_CLOCK_LIMITS.maxIncrementMs + 1 },
     { baseMs: 60_000, incrementMs: 0.5 },
+    { baseMs: 60_000, perMoveMs: -1 },
+    { baseMs: 60_000, perMoveMs: 1.5 },
+    { baseMs: 60_000, perMoveMs: DEFAULT_CLOCK_LIMITS.maxPerMoveMs + 1 },
   ];
   for (const raw of bad) {
     assert.throws(() => normalizeTimeControl(raw), /bad_time_control/, JSON.stringify(raw));
   }
-  // Giới hạn có thể ghi đè (dùng cho test với thời gian ngắn)
+  // Giới hạn có thể ghi đè (dùng cho test với thời gian ngắn); thiếu maxPerMoveMs vẫn chấp nhận perMoveMs mặc định
   assert.deepEqual(normalizeTimeControl({ baseMs: 300 }, { ...DEFAULT_CLOCK_LIMITS, minBaseMs: 100 }),
-    { baseMs: 300, incrementMs: 0 });
+    { baseMs: 300, incrementMs: 0, perMoveMs: 0 });
 });
 
 test('timeControlKey: ghép trận chỉ giữa những người cùng mức thời gian', () => {
   assert.equal(timeControlKey(null), 'none');
-  assert.equal(timeControlKey({ baseMs: 600_000, incrementMs: 5_000 }), '600000+5000');
+  assert.equal(timeControlKey({ baseMs: 600_000, incrementMs: 5_000, perMoveMs: 0 }), '600000+5000+0');
   assert.notEqual(timeControlKey({ baseMs: 600_000, incrementMs: 0 }), timeControlKey({ baseMs: 600_000, incrementMs: 5_000 }));
+  // Khác giới hạn mỗi nước thì không ghép chung
+  assert.notEqual(
+    timeControlKey({ baseMs: 600_000, incrementMs: 0, perMoveMs: 30_000 }),
+    timeControlKey({ baseMs: 600_000, incrementMs: 0, perMoveMs: 0 }),
+  );
+});
+
+test('giới hạn mỗi nước: quá hạn nước đi thì bên đó bị xử thua dù còn tổng giờ', () => {
+  const time = fakeTime();
+  const clock = new GameClock({ baseMs: 600_000, incrementMs: 0, perMoveMs: 30_000 }, time.now);
+  clock.start('red');
+  // Mỗi nước giới hạn 30s, nhỏ hơn tổng giờ còn lại rất nhiều.
+  assert.equal(clock.msUntilFlag(), 30_000);
+  time.advance(30_001);
+  clock.tick(); // như server làm trong onFlag trước khi kiểm tra
+  assert.equal(clock.isExpired('red'), true); // hết giờ cho nước này
+  const s = clock.snapshot();
+  assert.ok(s.remainingMs.red > 500_000, 'tổng giờ vẫn còn nhiều');
+  assert.equal(s.moveRemainingMs, 0);
+});
+
+test('giới hạn mỗi nước: đi trong hạn thì nước kế tiếp được đặt lại đồng hồ nước', () => {
+  const time = fakeTime();
+  const clock = new GameClock({ baseMs: 600_000, incrementMs: 0, perMoveMs: 30_000 }, time.now);
+  clock.start('red');
+  time.advance(10_000); // Đỏ dùng 10s
+  assert.equal(clock.press(), null); // đi hợp lệ, chuyển sang Đen
+  const s = clock.snapshot();
+  assert.equal(s.running, 'black');
+  assert.equal(s.moveRemainingMs, 30_000); // đồng hồ nước của Đen được đặt lại đầy đủ
+});
+
+test('snapshot: moveRemainingMs là null khi không giới hạn mỗi nước', () => {
+  const time = fakeTime();
+  const clock = new GameClock({ baseMs: 60_000, incrementMs: 0 }, time.now);
+  clock.start('red');
+  assert.equal(clock.snapshot().moveRemainingMs, null);
 });

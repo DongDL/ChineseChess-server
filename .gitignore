@@ -6,3 +6,5 @@ data/
 # Chứng chỉ TLS cho máy cục bộ — KHÔNG commit khoá riêng
 .ssl/
 /.env
+/.env.prod
+/.env.dev

@@ -9,14 +9,18 @@ Facebook, Zalo, hoặc chơi với tư cách khách), và lưu ván đấu + l�
 ```bash
 npm install
 docker compose up -d                       # PostgreSQL (hoặc dùng PostgreSQL có sẵn của bạn)
-cp .env.example .env                       # rồi chỉnh; hoặc đặt biến môi trường trực tiếp
+#   cấu hình nằm trong .env (file duy nhất, đã gitignore) — chỉnh trực tiếp, hoặc đặt biến môi trường
 DATABASE_URL=postgres://xiangqi:xiangqi@localhost:5432/xiangqi npm start     # http://localhost:3000  (GET /health)
+#   có TLS_KEY_FILE + TLS_CERT_FILE thì thêm cả https://localhost:3443 — xem mục "HTTPS"
 npm run migrate                            # tạo/nâng cấp bảng thủ công (server tự làm khi AUTO_MIGRATE != 0)
 npm run demo -- http://localhost:3000 200 100   # 2 bot đánh nhau (URL, số nước tối đa, ms/nước)
 ```
 
 Không đặt `DATABASE_URL` thì server vẫn chạy nhưng **mọi dữ liệu chỉ nằm trong bộ nhớ và mất khi tắt** (có cảnh báo khi khởi động).
-Yêu cầu Node.js >= 18. Toàn bộ biến môi trường và chú thích nằm trong `.env.example`.
+Yêu cầu Node.js >= 18. Toàn bộ biến môi trường và chú thích nằm trong **`.env`** — project dùng một file
+cấu hình duy nhất (không có `.env.example`). File này nằm trong `.gitignore` vì chứa bí mật thật, nên khi dựng
+máy mới hoặc deploy phải copy file này sang rồi **thay mọi bí mật** (`JWT_SECRET`, `DATABASE_URL`, `SMTP_PASS`,
+khoá OAuth). Node nạp file bằng cờ sẵn có `--env-file=.env`, không cần thư viện `dotenv`.
 
 ### Kiểm thử
 
@@ -37,7 +41,10 @@ Bộ test dùng một **máy chủ giả** của Google/Facebook/Zalo kiểm tra
 | `src/engine.js` | Engine luật (port 1-1 của `xiangqi_engine.dart`): nước đi, chiếu, chiếu bí, lặp nước, chiếu liên tục |
 | `src/clock.js` | Đồng hồ cờ kiểu Fischer (server tính giờ) |
 | `src/game-server.js`, `src/room.js` | Logic Socket.IO: phòng, ghép trận, nước đi, đầu hàng, hoà, nối lại |
-| `src/auth.js` | `AuthService`: đăng ký/đăng nhập mật khẩu (scrypt), phiên, chống dò mật khẩu, ghi lịch sử đăng nhập |
+| `src/auth.js` | `AuthService`: đăng ký/đăng nhập mật khẩu (scrypt), cấp cặp JWT, phiên, chống dò mật khẩu, ghi lịch sử đăng nhập |
+| `src/jwt.js` | Ký/kiểm JWT HS256 bằng `node:crypto` (không thêm phụ thuộc); chỉ nhận `alg: HS256` |
+| `src/tls.js` | Đọc chứng chỉ TLS từ biến môi trường để bật HTTPS (thiếu chứng chỉ thì chỉ chạy HTTP) |
+| `src/app.js` | Dựng HTTP (+ HTTPS) dùng chung bộ định tuyến và chung engine Socket.IO |
 | `src/oauth.js`, `src/providers.js` | Đăng nhập Google / Facebook / Zalo (OAuth 2.0 + PKCE), liên kết, gỡ liên kết |
 | `src/stores/pg.js`, `src/stores/memory.js` | Lưu trữ PostgreSQL / bộ nhớ, **cùng một giao diện** và cùng bộ test hợp đồng |
 | `src/migrate.js`, `migrations/*.sql` | Tạo và nâng cấp schema. Thay đổi schema = thêm file `002_...sql`, **không sửa file cũ** |
@@ -69,17 +76,64 @@ io(url, { auth: { token } });
 - Thông tin người chơi gửi cho đối thủ là `{ name, connected, guest }`; `playerId` và id tài khoản không bao giờ bị lộ.
 - Khách chưa có mật khẩu: ai biết `playerId` là vào được ván đó. Tên khách không duy nhất và không được xác thực, hãy dựa vào cờ `guest`.
 
-## Đăng nhập mật khẩu
+## Đăng nhập mật khẩu (JWT)
 
 | Lệnh | Gửi | Trả về |
 |---|---|---|
-| `POST /auth/register` | `{ username, password, displayName? }` | `{ ok, token, user }` |
-| `POST /auth/login` | `{ username, password }` | `{ ok, token, user }` |
-| `GET /auth/me` | `Authorization: Bearer <token>` | `{ ok, user }` kèm `providers`, `hasPassword` |
-| `POST /auth/logout` | `Authorization: Bearer <token>` | `{ ok }` (thu hồi token ngay) |
+| `POST /auth/register` | `{ username, password, displayName? }` | cặp token + `user` |
+| `POST /auth/login` | `{ username, password }` | cặp token + `user` |
+| `POST /auth/refresh` | `{ refreshToken }` | cặp token mới + `user` |
+| `GET /auth/me` | `Authorization: Bearer <accessToken>` | `{ ok, user }` kèm `providers`, `hasPassword` |
+| `POST /auth/logout` | `Authorization: Bearer <accessToken>` | `{ ok }` (thu hồi cả phiên ngay) |
+
+"Cặp token" là:
+
+```json
+{ "ok": true, "token": "<accessToken>", "accessToken": "eyJ...", "refreshToken": "eyJ...",
+  "tokenType": "Bearer", "expiresIn": 3600, "user": { "...": "..." } }
+```
+
+- **access token** — gửi kèm mọi yêu cầu ở `Authorization: Bearer ...`. Sống ngắn (`JWT_ACCESS_TTL_MS`,
+  mặc định 1 giờ) để nếu bị lộ thì thiệt hại có hạn. Khoá `token` là tên cũ, giá trị y hệt `accessToken`.
+- **refresh token** — chỉ dùng cho `POST /auth/refresh`. Sống bằng tuổi phiên (`SESSION_TTL_MS`, mặc định 30 ngày).
+  Server **xoay token**: mỗi refresh token dùng được một lần, dùng lại lần hai bị từ chối (phát hiện token bị trộm).
+
+Ký bằng HS256 với `JWT_SECRET` (`src/jwt.js`, chỉ dùng `node:crypto`, không thêm phụ thuộc).
+Chỉ chấp nhận `alg: HS256`, nên không bị lỗ hổng `alg: none` hay lẫn lộn thuật toán.
+
+**Vẫn thu hồi được ngay.** Đây không phải JWT "không trạng thái" thuần: mỗi token mang `sid` trỏ tới một bản ghi
+phiên trong CSDL, nên đăng xuất / đổi mật khẩu có hiệu lực tức thì (JWT thuần thì phải chờ hết hạn). CSDL chỉ lưu
+**băm** của `sid`, và băm theo miền riêng (`sha256("sid|" + sid)`) nên `sid` đọc được từ payload cũng không dùng
+thay token được. Token "đục" kiểu cũ vẫn được chấp nhận để client bản trước không bị đăng xuất khi nâng cấp server.
+
+> Đặt `JWT_SECRET` cố định khi chạy thật. Bỏ trống thì server tự sinh khoá ngẫu nhiên mỗi lần khởi động (có cảnh báo):
+> khởi động lại là mọi người phải đăng nhập lại, và chạy nhiều tiến trình sẽ không hiểu token của nhau.
 
 `user` = `{ id, username, displayName, avatarUrl }` (`username` là `null` với tài khoản chỉ đăng nhập mạng xã hội).
 Tên đăng nhập 3-20 ký tự `a-z 0-9 _` (không phân biệt hoa thường), mật khẩu 8-128 ký tự, tên hiển thị 2-24 ký tự.
+
+Socket.IO cũng dùng access token: `auth: { token: '<accessToken>' }` lúc bắt tay.
+
+## HTTPS: chạy song song HTTP và HTTPS
+
+Có đủ `TLS_KEY_FILE` + `TLS_CERT_FILE` thì server lắng nghe **đồng thời** HTTP (`PORT`) và HTTPS (`HTTPS_PORT`).
+Thiếu chứng chỉ thì chỉ chạy HTTP — đúng cho Render/Railway/Fly, nơi nền tảng tự lo TLS.
+
+Hai server dùng **chung một bộ định tuyến và chung một engine Socket.IO**, nên người vào bằng HTTP và người vào
+bằng HTTPS vẫn gặp nhau trong cùng một ván. (Không dùng được `io.attach()` lần hai vì hàm đó ghi đè engine cũ;
+`src/app.js` chuyển thẳng request/upgrade vào `io.engine`.)
+
+Tạo chứng chỉ cho máy cục bộ — **khuyến nghị `mkcert`** vì hệ điều hành sẽ tin chứng chỉ đó, nên cả HTTP lẫn
+WebSocket đều chạy mà không phải sửa code client:
+
+```bash
+choco install mkcert ; mkcert -install
+mkdir .ssl ; mkcert -key-file .ssl/localhost-key.pem -cert-file .ssl/localhost.pem localhost 127.0.0.1 10.0.2.2
+```
+
+Chứng chỉ tự ký bằng `openssl` cũng chạy được, nhưng trình duyệt sẽ cảnh báo và app Flutter chỉ chấp nhận ở
+**bản debug** với host cục bộ/LAN (xem `lib/net/dev_tls_io.dart` ở client). Thư mục `.ssl/` nằm trong `.gitignore`:
+**không bao giờ commit khoá riêng**.
 
 ## Đăng nhập Google / Facebook / Zalo
 
@@ -200,7 +254,7 @@ Tài khoản mật khẩu chưa có email nên cần thêm và **xác minh** ema
 
 Mã 6 số, hiệu lực 15 phút, dùng một lần, **sai 5 lần là huỷ**, chỉ lưu băm. Mã mới thay mã cũ.
 
-**Cấu hình gửi thư** (biến môi trường, xem `.env.example`): `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`.
+**Cấu hình gửi thư** (biến môi trường, xem `.env`): `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `SMTP_FROM`.
 Gmail: `smtp.gmail.com` cổng 465 (`SMTP_SECURE=1`) hoặc 587, và `SMTP_PASS` phải là **Mật khẩu ứng dụng** (bật xác minh 2 bước rồi tạo ở tài khoản Google), không phải mật khẩu đăng nhập.
 Không đặt `SMTP_HOST`: khi phát triển mã được in ra console; khi `NODE_ENV=production` tính năng email bị tắt (API trả `email_unavailable`, 503).
 Cổng 587 bắt buộc nâng cấp TLS. **Không bao giờ commit `.env`.**

@@ -3,7 +3,7 @@ import nodemailer from 'nodemailer';
 /**
  * Gửi email. Mọi mailer có cùng giao diện: `await mailer.send({ to, subject, text })`.
  *
- * Cấu hình SMTP qua biến môi trường (xem .env.example): SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM.
+ * Cấu hình SMTP qua biến môi trường (xem .env): SMTP_HOST, SMTP_PORT, SMTP_SECURE, SMTP_USER, SMTP_PASS, SMTP_FROM.
  * Gmail: dùng "Mật khẩu ứng dụng" (App password, cần bật xác minh 2 bước), KHÔNG dùng mật khẩu đăng nhập Google;
  * smtp.gmail.com cổng 465 (SMTP_SECURE=1) hoặc 587.
  */

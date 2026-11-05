@@ -17,8 +17,13 @@ const html = (res, status, text) => {
  *   GET    /auth/providers                      -> { ok, providers: ['google', ...] }  (chỉ những bên đã cấu hình)
  *   POST   /auth/register  { username, password, displayName? }  -> { ok, token, user }
  *   POST   /auth/login     { username, password }                -> { ok, token, user }
+ *   POST   /auth/refresh  { refreshToken }                       -> { ok, token, accessToken, refreshToken, user }
  *   GET    /auth/me        (Bearer)                              -> { ok, user: { ..., providers, hasPassword } }
  *   POST   /auth/logout    (Bearer)                              -> { ok }
+ *
+ * Đăng ký / đăng nhập / làm mới đều trả về cùng một hình dạng:
+ *   { ok, token, accessToken, refreshToken, tokenType: 'Bearer', expiresIn, user }
+ * trong đó `token` === `accessToken` (giữ tên cũ cho client bản trước).
  *   POST   /auth/password  (Bearer) { currentPassword, newPassword } -> { ok, revoked }  (thu hồi các phiên khác)
 
  *   POST   /auth/email     (Bearer) { email, password }          -> { ok, email, verified }  (gửi mã xác minh 6 số tới email)
@@ -62,6 +67,10 @@ export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = f
         send(res, 200, { ok: true, ...(await auth.register(await readJson(req), ctx)) });
       } else if (route === 'POST /auth/login') {
         send(res, 200, { ok: true, ...(await auth.login(await readJson(req), ctx)) });
+      } else if (route === 'POST /auth/refresh') {
+        // Không dùng Bearer: access token lúc này thường đã hết hạn, refresh token nằm trong thân yêu cầu.
+        const body = await readJson(req);
+        send(res, 200, { ok: true, ...(await auth.refresh(body.refreshToken, ctx)) });
       } else if (route === 'GET /auth/me') {
         const user = await requireUser(req);
         send(res, 200, { ok: true, user: await auth.profile(user.id) });

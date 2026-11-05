@@ -5,9 +5,11 @@ import { mailerFromEnv } from './mailer.js';
 import { providersFromEnv } from './providers.js';
 import { MemoryStore } from './stores/memory.js';
 import { PgStore } from './stores/pg.js';
+import { tlsOptionsFromEnv } from './tls.js';
 
 const env = process.env;
 const port = Number(env.PORT ?? 3000);
+const httpsPort = Number(env.HTTPS_PORT ?? 3443);
 // ---- Kho lưu trữ: PostgreSQL nếu có DATABASE_URL, không thì lưu tạm trong bộ nhớ ----
 let store;
 if (env.DATABASE_URL) {
@@ -24,7 +26,20 @@ if (env.DATABASE_URL) {
 
 // ---- Đăng nhập: mật khẩu + Google/Facebook/Zalo (chỉ bật bên nào có đủ khoá trong biến môi trường) ----
 const mailer = mailerFromEnv(env);
-const authService = new AuthService({ store, mailer, appName: env.APP_NAME ?? 'Cờ tướng online' });
+const authService = new AuthService({
+  store,
+  mailer,
+  appName: env.APP_NAME ?? 'Cờ tướng online',
+  jwtSecret: env.JWT_SECRET ?? '',
+  accessTtlMs: Number(env.JWT_ACCESS_TTL_MS ?? 60 * 60_000),
+  sessionTtlMs: Number(env.SESSION_TTL_MS ?? 30 * 24 * 60 * 60_000),
+});
+if (authService.jwtSecretEphemeral) {
+  console.warn(
+    'CẢNH BÁO: chưa đặt JWT_SECRET nên đang dùng khoá ngẫu nhiên tạm. Khởi động lại server là mọi người'
+    + ' phải đăng nhập lại, và nhiều tiến trình/máy sẽ không hiểu token của nhau.',
+  );
+}
 const providers = providersFromEnv(env);
 const oauth = new OAuthService({
   store,
@@ -38,19 +53,34 @@ if (providers.size > 0 && !env.PUBLIC_URL) {
 }
 console.log(`Đăng nhập mạng xã hội: ${providers.size ? [...providers.keys()].join(', ') : '(chưa bật)'}`);
 
+// ---- HTTPS: chỉ bật khi có chứng chỉ TLS (trên Railway/Render thì nền tảng lo TLS, server chỉ cần HTTP) ----
+const httpsOptions = tlsOptionsFromEnv(env);
+
 const app = createApp({
   corsOrigin: env.CORS_ORIGIN ?? '*',
   graceMs: Number(env.RECONNECT_GRACE_MS ?? 60_000),
   trustProxy: env.TRUST_PROXY === '1',
   authEventRetentionDays: Number(env.AUTH_EVENT_RETENTION_DAYS ?? 180),
+  httpsOptions,
   store,
   authService,
   oauth,
 });
 
-app.httpServer.listen(port, () => {
-  console.log(`Xiangqi server đang chạy: http://localhost:${port}  (health: /health)`);
+// 0.0.0.0 để truy cập được từ điện thoại thật, emulator Android (10.0.2.2) và trong Docker.
+app.httpServer.listen(port, '0.0.0.0', () => {
+  console.log(`HTTP  ▶ http://localhost:${port}   (health: /health)`);
 });
+
+if (app.httpsServer) {
+  app.httpsServer.listen(httpsPort, '0.0.0.0', () => {
+    console.log(`HTTPS ▶ https://localhost:${httpsPort}  (health: /health)`);
+  });
+  app.httpsServer.on('error', (err) => {
+    // Không tắt cả server chỉ vì cổng HTTPS bị chiếm: HTTP vẫn phải phục vụ được.
+    console.error(`HTTPS không khởi động được trên cổng ${httpsPort}: ${err.message}`);
+  });
+}
 
 const shutdown = async () => {
   console.log('Đang tắt server...');

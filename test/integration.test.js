@@ -36,6 +36,9 @@ const impls = [
 
 const quiet = { error() {} };
 const FAST = { N: 1024, r: 8, p: 1 };
+// Khoá ký JWT là CẤU HÌNH của tiến trình (giống DATABASE_URL), không phải dữ liệu trong kho.
+// Test "khởi động lại" phải dùng lại đúng khoá này, đúng như JWT_SECRET phải cố định giữa các lần chạy thật.
+const JWT_SECRET = 'khoa-ky-jwt-chi-dung-trong-test';
 const BIG = { max: 100_000, windowMs: 60 * 60_000 };
 
 for (const impl of impls) {
@@ -55,7 +58,7 @@ for (const impl of impls) {
       mockServer = await startMockProviders();
       mock = mockServer.mock;
       auth = new AuthService({
-        store, scryptParams: FAST, log: quiet, limits: { registerPerIp: BIG, loginPerIp: BIG },
+        store, scryptParams: FAST, log: quiet, jwtSecret: JWT_SECRET, limits: { registerPerIp: BIG, loginPerIp: BIG },
       });
       // Khoá EC P-256 thật để server ký được client_secret của Apple (mock chỉ kiểm cấu trúc JWT, không kiểm chữ ký).
       const { privateKey: applePem } = generateKeyPairSync('ec', {
@@ -493,7 +496,9 @@ for (const impl of impls) {
       const acc = await registerUser('khoidong');
       const reopened = await impl.reopen(store);
       try {
-        const auth2 = new AuthService({ store: reopened, scryptParams: FAST, log: quiet });
+        const auth2 = new AuthService({
+          store: reopened, scryptParams: FAST, log: quiet, jwtSecret: JWT_SECRET,
+        });
         assert.equal((await auth2.authenticate(acc.token)).id, acc.user.id);
         assert.ok(await auth2.login({ username: acc.user.username, password: 'matkhau123' }));
         const someGame = (await store.listGamesOfUser((await store.findUserByUsername(

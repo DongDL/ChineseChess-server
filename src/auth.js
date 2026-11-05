@@ -2,6 +2,9 @@ import {
   createHash, randomBytes, randomInt, scrypt as scryptCb, timingSafeEqual,
 } from 'node:crypto';
 import { promisify } from 'node:util';
+import {
+  JwtError, looksLikeJwt, randomSecret, signJwt, verifyJwt,
+} from './jwt.js';
 
 const scrypt = promisify(scryptCb);
 
@@ -133,6 +136,23 @@ export class RateLimiter {
 const DAY_MS = 24 * 60 * 60_000;
 export const sha256 = (s) => createHash('sha256').update(s).digest('hex');
 
+/**
+ * Khoá tra phiên trong kho, tính từ `sid` nằm trong JWT.
+ *
+ * Tiền tố 'sid|' tạo MIỀN BĂM riêng, khác với băm của token "đục" kiểu cũ (`sha256(token)`).
+ * Nhờ vậy kẻ đọc được payload của JWT (payload chỉ là base64, ai cũng đọc được) KHÔNG thể lấy
+ * `sid` ra dùng như một token kiểu cũ để bỏ qua bước kiểm tra chữ ký — đặc biệt quan trọng vì
+ * refresh token cũng chứa `sid` nhưng không được phép dùng thay access token.
+ */
+const sidKey = (sid) => sha256(`sid|${sid}`);
+
+/** Loại token trong claim `typ`: access dùng cho mọi API, refresh chỉ dùng cho /auth/refresh. */
+const TOKEN_ACCESS = 'access';
+const TOKEN_REFRESH = 'refresh';
+
+/** Chặn băm chuỗi quá dài do client gửi bừa (JWT thật chỉ vài trăm ký tự). */
+const MAX_TOKEN_CHARS = 4096;
+
 /** Thông tin công khai của người dùng (không bao giờ có băm mật khẩu hay email). */
 export const publicUser = (u) => ({
   id: u.id,
@@ -148,9 +168,20 @@ const ctxOf = (ctx) => {
 };
 
 /**
- * Đăng ký / đăng nhập bằng tên đăng nhập + mật khẩu. Đăng nhập thành công trả về token ngẫu nhiên
- * (client gửi lại ở các lần sau). Server chỉ lưu BĂM của token nên lộ cơ sở dữ liệu cũng không lấy được token.
- * Token là phiên "đục" lưu phía server nên đăng xuất là thu hồi được ngay.
+ * Đăng ký / đăng nhập bằng tên đăng nhập + mật khẩu. Đăng nhập thành công trả về một cặp token JWT:
+ *
+ * - **access token** (`token` / `accessToken`): gửi kèm mọi yêu cầu ở tiêu đề `Authorization: Bearer ...`.
+ *   Sống ngắn ([accessTtlMs], mặc định 1 giờ) để nếu bị lộ thì thiệt hại có hạn.
+ * - **refresh token** (`refreshToken`): chỉ dùng cho `POST /auth/refresh` để xin access token mới.
+ *   Sống bằng tuổi của phiên ([sessionTtlMs], mặc định 30 ngày).
+ *
+ * JWT ở đây KHÔNG phải JWT "không trạng thái" thuần: mỗi token mang `sid` trỏ tới một bản ghi phiên
+ * trong kho, nên đăng xuất / đổi mật khẩu vẫn THU HỒI ĐƯỢC NGAY (JWT thuần thì phải chờ hết hạn).
+ * Kho chỉ lưu BĂM của `sid` nên lộ cơ sở dữ liệu cũng không dựng lại được token.
+ *
+ * Token "đục" kiểu cũ (chuỗi ngẫu nhiên base64url) vẫn được chấp nhận để client bản cũ không bị
+ * đăng xuất đột ngột khi nâng cấp server.
+ *
  * Mọi lần đăng ký / đăng nhập / đăng xuất (kể cả thất bại) được ghi vào lịch sử đăng nhập.
  */
 export class AuthService {
@@ -158,6 +189,8 @@ export class AuthService {
     store,
     now = () => Date.now(),
     sessionTtlMs = 30 * DAY_MS,
+    accessTtlMs = 60 * 60_000,
+    jwtSecret = '',
     scryptParams = DEFAULT_SCRYPT,
     limits = {},
     log = console,
@@ -172,7 +205,13 @@ export class AuthService {
     this._now = now;
     this.log = log;
     this.sessionTtlMs = sessionTtlMs;
+    // Access token không bao giờ sống lâu hơn chính phiên của nó.
+    this.accessTtlMs = Math.min(accessTtlMs, sessionTtlMs);
     this.scryptParams = scryptParams;
+    // Thiếu JWT_SECRET thì tự sinh khoá ngẫu nhiên: server vẫn chạy được khi phát triển và khi chạy test,
+    // nhưng khởi động lại là mọi người phải đăng nhập lại, và nhiều tiến trình sẽ không hiểu token của nhau.
+    this.jwtSecret = typeof jwtSecret === 'string' && jwtSecret !== '' ? jwtSecret : randomSecret();
+    this.jwtSecretEphemeral = this.jwtSecret !== jwtSecret;
     const L = {
       registerPerIp: { max: 10, windowMs: 60 * 60_000 },
       loginPerIp: { max: 30, windowMs: 10 * 60_000 },
@@ -261,24 +300,119 @@ export class AuthService {
     return this.startSession(user, { method: 'password', ...c });
   }
 
+  /** Ký cặp access + refresh token cho một phiên đã có trong kho. */
+  _issueTokens({ sid, userId, method, expiresAt }) {
+    const now = this._now();
+    const claims = { sub: userId, sid, mth: method };
+    const accessToken = signJwt({ ...claims, typ: TOKEN_ACCESS }, this.jwtSecret, {
+      ttlMs: Math.min(this.accessTtlMs, Math.max(1000, expiresAt - now)),
+      now,
+    });
+    // Refresh token hết hạn đúng lúc phiên hết hạn: không có chuyện gia hạn phiên vô thời hạn.
+    const refreshToken = signJwt({ ...claims, typ: TOKEN_REFRESH }, this.jwtSecret, {
+      ttlMs: Math.max(1000, expiresAt - now),
+      now,
+    });
+    return {
+      token: accessToken, // tên cũ, giữ lại để client bản trước không phải sửa
+      accessToken,
+      refreshToken,
+      tokenType: 'Bearer',
+      expiresIn: Math.floor(Math.min(this.accessTtlMs, Math.max(1000, expiresAt - now)) / 1000),
+    };
+  }
+
   /** Tạo phiên đăng nhập mới cho [user]. Dùng chung cho mật khẩu và đăng nhập mạng xã hội. */
   async startSession(user, { method, ip = null, userAgent = null }) {
-    const token = randomBytes(32).toString('base64url');
+    const sid = randomBytes(32).toString('base64url');
     const now = this._now();
+    const expiresAt = now + this.sessionTtlMs;
     await this.store.createSession({
-      tokenHash: sha256(token), userId: user.id, expiresAt: now + this.sessionTtlMs, method, ip, userAgent,
+      tokenHash: sidKey(sid), userId: user.id, expiresAt, method, ip, userAgent,
     });
     await this.store.touchLogin(user.id, now);
-    return { token, user: publicUser(user) };
+    return {
+      ...this._issueTokens({ sid, userId: user.id, method, expiresAt }),
+      user: publicUser(user),
+    };
+  }
+
+  /**
+   * Quy một bearer token ra khoá phiên trong kho (để thu hồi / tra cứu), hoặc null nếu token không đọc được.
+   * [expectedType] mặc định là access; truyền TOKEN_REFRESH khi xử lý /auth/refresh.
+   */
+  _readToken(token, expectedType = TOKEN_ACCESS) {
+    if (typeof token !== 'string' || token.length < 20 || token.length > MAX_TOKEN_CHARS) return null;
+    if (!looksLikeJwt(token)) {
+      // Token "đục" kiểu cũ: chỉ hợp lệ ở vai trò access token.
+      if (expectedType !== TOKEN_ACCESS || token.length > 100) return null;
+      return { sessionHash: sha256(token), userId: null, method: null, legacy: true };
+    }
+    try {
+      const claims = verifyJwt(token, this.jwtSecret, { now: this._now() });
+      if (claims.typ !== expectedType) return null;
+      if (typeof claims.sid !== 'string' || typeof claims.sub !== 'string') return null;
+      return {
+        sessionHash: sidKey(claims.sid),
+        sid: claims.sid,
+        userId: claims.sub,
+        method: typeof claims.mth === 'string' ? claims.mth : null,
+        legacy: false,
+      };
+    } catch (err) {
+      if (err instanceof JwtError) return null;
+      throw err;
+    }
+  }
+
+  /** Khoá phiên ứng với bearer token (null nếu không đọc được). Dùng khi cần thu hồi đúng phiên hiện tại. */
+  sessionKeyOf(token) {
+    return this._readToken(token)?.sessionHash ?? null;
   }
 
   /** Trả về người dùng ứng với token còn hạn, hoặc null. */
   async authenticate(token) {
-    if (typeof token !== 'string' || token.length < 20 || token.length > 100) return null;
-    const session = await this.store.getSession(sha256(token), this._now());
+    const parsed = this._readToken(token, TOKEN_ACCESS);
+    if (!parsed) return null;
+    const session = await this.store.getSession(parsed.sessionHash, this._now());
     if (!session) return null;
+    // Chữ ký hợp lệ nhưng `sub` không khớp phiên: token đã bị sửa hoặc phiên đã được cấp lại cho người khác.
+    if (parsed.userId && parsed.userId !== session.userId) return null;
     const user = await this.store.findUserById(session.userId);
     return user ? publicUser(user) : null;
+  }
+
+  /**
+   * Đổi refresh token lấy cặp token mới. Áp dụng XOAY TOKEN (rotation): phiên được cấp `sid` mới và
+   * `sid` cũ bị xoá ngay, nên refresh token chỉ dùng được một lần — dùng lại lần hai sẽ bị từ chối.
+   * Thời điểm hết hạn của phiên KHÔNG đổi, nên refresh không kéo dài phiên vô hạn.
+   */
+  async refresh(refreshToken, ctx) {
+    const parsed = this._readToken(refreshToken, TOKEN_REFRESH);
+    if (!parsed) throw new AuthError('invalid_token', 401);
+    const now = this._now();
+    const session = await this.store.getSession(parsed.sessionHash, now);
+    if (!session || session.userId !== parsed.userId) throw new AuthError('invalid_token', 401);
+    const user = await this.store.findUserById(session.userId);
+    if (!user) throw new AuthError('invalid_token', 401);
+
+    const c = ctxOf(ctx);
+    const method = parsed.method ?? 'token';
+    const sid = randomBytes(32).toString('base64url');
+    await this.store.createSession({
+      tokenHash: sidKey(sid),
+      userId: session.userId,
+      expiresAt: session.expiresAt, // giữ nguyên hạn của phiên gốc
+      method,
+      ip: c.ip,
+      userAgent: c.userAgent,
+    });
+    await this.store.deleteSession(parsed.sessionHash);
+    await this.recordEvent({ userId: session.userId, event: 'token_refresh', method, success: true }, c);
+    return {
+      ...this._issueTokens({ sid, userId: session.userId, method, expiresAt: session.expiresAt }),
+      user: publicUser(user),
+    };
   }
 
   /** Thông tin người dùng kèm các nhà cung cấp đã liên kết và việc có mật khẩu hay không. */
@@ -462,7 +596,8 @@ export class AuthService {
     validatePassword(newPassword);
     if (newPassword === currentPassword) throw new AuthError('same_password', 400);
     await this.store.setPasswordHash(userId, await hashPassword(newPassword, this.scryptParams));
-    const revoked = await this.store.deleteSessionsOfUser(userId, sha256(currentToken ?? ''));
+    // Giữ lại đúng phiên đang dùng; các phiên khác (kể cả refresh token của chúng) bị thu hồi.
+    const revoked = await this.store.deleteSessionsOfUser(userId, this.sessionKeyOf(currentToken) ?? '');
     await this.recordEvent({ userId, event: 'password_change', method: 'password', success: true, detail: `revoked:${revoked}` }, ctx);
     return revoked;
   }
@@ -482,10 +617,10 @@ export class AuthService {
     await this.store.deleteUser(userId);
   }
 
-  /** Thu hồi token (đăng xuất). */
+  /** Thu hồi phiên của token (đăng xuất): cả access token và refresh token của phiên đó hết tác dụng ngay. */
   async logout(token, ctx) {
-    if (typeof token !== 'string') return;
-    const hash = sha256(token);
+    const hash = this.sessionKeyOf(token);
+    if (!hash) return;
     const session = await this.store.getSession(hash, this._now());
     await this.store.deleteSession(hash);
     if (session) {

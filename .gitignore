@@ -3,3 +3,5 @@ node_modules/
 *.log
 data/
 /package-lock.json
+# Chứng chỉ TLS cho máy cục bộ — KHÔNG commit khoá riêng
+.ssl/

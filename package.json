@@ -1,6 +1,6 @@
 {
   "name": "xiangqi-server",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Server cờ tướng online (Node.js + Socket.IO). Server làm trọng tài: kiểm tra mọi nước đi bằng engine luật riêng.",
   "type": "module",
   "main": "src/index.js",

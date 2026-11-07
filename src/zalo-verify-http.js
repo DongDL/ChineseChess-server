@@ -8,9 +8,11 @@
  *
  * Zalo có thể yêu cầu NHIỀU đường dẫn cùng lúc (ví dụ cả ở gốc domain lẫn dưới đường dẫn callback),
  * nên route này nhận một DANH SÁCH mục, mỗi mục gồm:
- *   - path : đường dẫn cần phục vụ (gồm cả path con), KHỚP TỪNG KÝ TỰ với URL Zalo đưa.
- *   - html : (ưu tiên) nội dung HTML y hệt file Zalo cấp.
+ *   - file : đường dẫn cần phục vụ (gồm cả path con), KHỚP TỪNG KÝ TỰ với URL Zalo đưa.
+ *   - html : (ưu tiên) nội dung trả về y hệt Zalo cấp (có thể là cả trang HTML, hoặc chuỗi text thuần).
  *   - code : (dự phòng) chỉ mã; khi thiếu html, server tự dựng trang HTML tối thiểu có thẻ meta.
+ *   - type : (tuỳ chọn) content-type, mặc định 'text/html'. Dùng 'text/plain' cho đường dẫn mà Zalo
+ *            chỉ cần chuỗi "zalo-platform-site-verification=<mã>".
  *
  * Vì không chỉnh được DNS/subdomain, ta phục vụ các file này trực tiếp từ server. Tất cả nằm trong
  * biến môi trường để KHÔNG hard-code và dễ đổi khi Zalo cấp lại, không phải sửa code.
@@ -27,32 +29,34 @@ export function createZaloVerifyRoute(config = {}) {
     + `<meta property="zalo-platform-site-verification" content="${code}" />`
     + `</head><body></body></html>`;
 
-  // path -> html. Bỏ qua mục thiếu đường dẫn hoặc thiếu cả html lẫn code.
+  // path -> { body, type }. Bỏ qua mục thiếu đường dẫn hoặc thiếu cả html/code.
+  // Zalo yêu cầu KHÁC nhau tuỳ đường dẫn: có nơi cần cả trang HTML, có nơi chỉ cần chuỗi text thuần
+  // "zalo-platform-site-verification=<mã>". `type` cho phép đặt content-type phù hợp (mặc định text/html).
   const byPath = new Map();
   for (const e of rawEntries) {
     const file = e?.file ?? '';
     if (!file) continue;
     const path = file.startsWith('/') ? file : `/${file}`;
-    const html = e.html ? e.html : e.code ? minimalHtml(e.code) : '';
-    if (!html) continue;
-    byPath.set(path, html);
+    const body = e.html ? e.html : e.code ? minimalHtml(e.code) : '';
+    if (!body) continue;
+    byPath.set(path, { body, type: e.type || 'text/html' });
   }
 
   return async function handle(req, res) {
     if (byPath.size === 0) return false;
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const html = byPath.get(url.pathname);
-    if (html === undefined) return false;
+    const entry = byPath.get(url.pathname);
+    if (entry === undefined) return false;
     if (req.method !== 'GET' && req.method !== 'HEAD') {
       res.writeHead(405, { 'content-type': 'text/plain; charset=utf-8', allow: 'GET, HEAD' });
       res.end('Method Not Allowed');
       return true;
     }
     res.writeHead(200, {
-      'content-type': 'text/html; charset=utf-8',
+      'content-type': `${entry.type}; charset=utf-8`,
       'cache-control': 'no-store',
     });
-    res.end(req.method === 'HEAD' ? undefined : html);
+    res.end(req.method === 'HEAD' ? undefined : entry.body);
     return true;
   };
 }

@@ -76,10 +76,11 @@ const ratingOfRow = (r) => {
  * Mọi truy vấn dùng tham số ($1, $2, ...) nên không có nguy cơ SQL injection.
  */
 export class PgStore {
-  constructor({ connectionString, pool, ratedMinMoves = RATED_MIN_MOVES } = {}) {
+  constructor({ connectionString, pool, ratedMinMoves = RATED_MIN_MOVES, log = console } = {}) {
+    this.log = log;
     this.ratedMinMoves = ratedMinMoves;
     this.pool = pool ?? new pg.Pool({ connectionString, max: 10 });
-    this.pool.on('error', (err) => console.error('[pg] lỗi kết nối nhàn rỗi:', err.message));
+    this.pool.on('error', (err) => this.log.error({ err }, 'Lỗi kết nối PostgreSQL nhàn rỗi (idle)'));
   }
 
   /** Tạo/nâng cấp bảng theo các file trong migrations/. Gọi một lần lúc khởi động. */

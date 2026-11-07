@@ -36,7 +36,7 @@ const html = (res, status, text) => {
  *   POST   /auth/oauth/exchange  { code }                        -> { ok, token, user }
  *   DELETE /auth/oauth/:provider (Bearer)                        -> { ok }  (gỡ liên kết)
  */
-export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = false } = {}) {
+export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = false, log = console } = {}) {
   const send = makeJsonSender(corsOrigin);
 
   const requireUser = async (req) => {
@@ -122,7 +122,7 @@ export function createAuthRoutes(auth, oauth, { corsOrigin = '*', trustProxy = f
         throw new AuthError('not_found', 404);
       }
     } catch (err) {
-      sendError(send, res, err);
+      sendError(send, res, err, log);
     }
     return true;
   };

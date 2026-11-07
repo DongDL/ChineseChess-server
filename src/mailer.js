@@ -43,15 +43,17 @@ export function createSmtpMailer({
   };
 }
 
-/** Chỉ để phát triển: in email (kèm mã) ra console. KHÔNG dùng khi chạy thật. */
+/** Chỉ để phát triển: in email (kèm mã) ra console/log. KHÔNG dùng khi chạy thật. */
 export function createConsoleMailer(log = console) {
+  // Tương thích cả console (log.log) lẫn logger Pino (log.info).
+  const info = typeof log.info === 'function' ? (m) => log.info(m) : (m) => log.log(m);
   return {
     kind: 'console',
     async send({ to, subject, text, attachments }) {
       const files = Array.isArray(attachments) && attachments.length
         ? `\n[đính kèm] ${attachments.map((a) => a.filename ?? '(không tên)').join(', ')}`
         : '';
-      log.log(`[mail:dev] tới ${to} | ${subject}\n${text}${files}`);
+      info(`[mail:dev] tới ${to} | ${subject}\n${text}${files}`);
     },
   };
 }

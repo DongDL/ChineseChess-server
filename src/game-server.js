@@ -63,8 +63,9 @@ export function cleanChat(raw) {
 export class GameServer {
   constructor(io, {
     graceMs = 60_000, sweepMs = 60_000, clockLimits = DEFAULT_CLOCK_LIMITS, authService = null, recorder = null,
-    ratingOf = null, matchmaking = {}, matchTickMs = 2000, now = Date.now,
+    ratingOf = null, matchmaking = {}, matchTickMs = 2000, now = Date.now, log = console,
   } = {}) {
+    this.log = log; // logger Pino (hoặc console) cho sự kiện socket và lỗi
     this.ratingOf = ratingOf; // async (userId) => Elo hiện tại, dùng để ghép trận theo Elo (null: mọi tài khoản coi như 1500)
     this.matchmaking = { ...MATCHMAKING_DEFAULTS, ...matchmaking };
     this.matchTickMs = matchTickMs;
@@ -119,7 +120,7 @@ export class GameServer {
         });
         return next();
       } catch (err) {
-        console.error('[auth]', err);
+        this.log.error({ err, 'event.module': 'socket.auth' }, 'Lỗi xác thực kết nối socket');
         return next(new Error('auth_error'));
       }
     });
@@ -170,6 +171,12 @@ export class GameServer {
 
   onConnection(socket) {
     const { playerId } = socket.data;
+    this.log.info?.({
+      'event.action': 'socket.connect',
+      'socket.id': socket.id,
+      playerId,
+      guest: socket.data.guest === true,
+    }, 'Kết nối socket mới');
 
     // Cùng một playerId kết nối lại: đóng kết nối cũ.
     const prev = this.sockets.get(playerId);
@@ -201,10 +208,18 @@ export class GameServer {
     const on = (event, handler) => {
       socket.on(event, (payload, ack) => {
         const reply = typeof ack === 'function' ? ack : () => {};
+        this.log.debug?.({
+          'event.action': event,
+          'event.category': 'socket',
+          'socket.id': socket.id,
+          playerId,
+        }, `socket ${event}`);
         try {
           handler(asObject(payload), reply);
         } catch (err) {
-          console.error(`[${event}]`, err);
+          this.log.error({
+            err, 'event.action': event, 'socket.id': socket.id, playerId,
+          }, `Lỗi xử lý sự kiện socket ${event}`);
           reply(fail('internal_error'));
         }
       });
@@ -256,6 +271,11 @@ export class GameServer {
 
   onDisconnect(socket) {
     const { playerId } = socket.data;
+    this.log.info?.({
+      'event.action': 'socket.disconnect',
+      'socket.id': socket.id,
+      playerId,
+    }, 'Ngắt kết nối socket');
     // Đã bị kết nối mới thay thế thì bỏ qua.
     if (this.sockets.get(playerId) !== socket) return;
     this.sockets.delete(playerId);
@@ -380,7 +400,7 @@ export class GameServer {
           try {
             rating = (await this.ratingOf(userId, variant)) ?? DEFAULT_RATING;
           } catch (err) {
-            console.error('[queue] không đọc được Elo, dùng điểm mặc định:', err.message);
+            this.log.error({ err, userId, variant }, 'Không đọc được Elo, dùng điểm mặc định');
           }
         }
       }
@@ -398,7 +418,7 @@ export class GameServer {
       reply(ok({ matched: true, roomId: room.id, side: room.sideOf(playerId), ...responseVariant }));
       return this.announce(room);
     } catch (err) {
-      console.error('[queue:join]', err);
+      this.log.error({ err, 'event.action': 'queue:join', playerId }, 'Lỗi khi tham gia hàng đợi ghép trận');
       return reply(fail('internal_error'));
     }
   }

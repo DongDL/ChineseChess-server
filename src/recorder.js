@@ -35,15 +35,15 @@ export class GameRecorder {
         try {
           onSaved?.(result);
         } catch (err) {
-          this.log.error(`[recorder] lỗi trong onSaved của ván ${game.id}: ${err.message}`);
+          this.log.error({ err, gameId: game.id }, `Lỗi trong onSaved của ván ${game.id}`);
         }
         return true;
       } catch (err) {
         lastError = err;
-        this.log.error(`[recorder] lỗi lưu ván ${game.id}: ${err.message}`);
+        this.log.error({ err, gameId: game.id }, `Lỗi lưu ván ${game.id}`);
       }
     }
-    this.log.error(`[recorder] BỎ CUỘC không lưu được ván ${game.id}: ${lastError?.message}`);
+    this.log.error({ err: lastError, gameId: game.id }, `BỎ CUỘC không lưu được ván ${game.id}`);
     return false;
   }
 

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { AuthError } from './auth.js';
 
 const MAX_BODY_BYTES = 4096;
@@ -63,12 +64,57 @@ export function requestContext(req, trustProxy = false) {
   return { ip, userAgent: typeof ua === 'string' ? ua.slice(0, 300) : null };
 }
 
-/** Báo lỗi nghiệp vụ (AuthError) hoặc lỗi nội bộ dưới dạng JSON. */
-export function sendError(send, res, err) {
+/**
+ * Báo lỗi nghiệp vụ (AuthError) hoặc lỗi nội bộ dưới dạng JSON.
+ * [log] (tuỳ chọn): logger để ghi lỗi nội bộ; mặc định dùng console cho tương thích ngược.
+ * Lỗi nghiệp vụ (AuthError) KHÔNG ghi log (đó là hành vi mong đợi, vd sai mật khẩu).
+ */
+export function sendError(send, res, err, log = console) {
   if (err instanceof AuthError) {
     send(res, err.status, { ok: false, error: err.code });
   } else {
-    console.error('[http]', err);
+    if (typeof log.error === 'function') log.error({ err }, 'Lỗi nội bộ khi xử lý HTTP');
+    else console.error('[http]', err);
     send(res, 500, { ok: false, error: 'internal_error' });
   }
+}
+
+/**
+ * Ghi log một vòng đời yêu cầu HTTP (truy cập log) vào logger Pino.
+ *
+ * Gắn `res.on('finish')` để log sau khi phản hồi xong, kèm:
+ *   http.request.method, url.path, http.response.status_code, event.duration (ms),
+ *   client.ip, user_agent.original, trace.id (request id, cũng trả về cho client qua header x-request-id).
+ *
+ * Trả về `requestId` để nơi gọi gắn vào `req` nếu muốn.
+ */
+export function logHttpRequest(logger, req, res, { trustProxy = false } = {}) {
+  if (!logger || typeof logger.info !== 'function') return null;
+  const start = process.hrtime.bigint();
+  const requestId = (typeof req.headers['x-request-id'] === 'string' && req.headers['x-request-id'])
+    || randomUUID();
+  const { ip, userAgent } = requestContext(req, trustProxy);
+
+  // Để client/đối tác lần được dòng log tương ứng.
+  res.setHeader('x-request-id', requestId);
+
+  res.on('finish', () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+    const status = res.statusCode;
+    const fields = {
+      'trace.id': requestId,
+      http: {
+        request: { method: req.method },
+        response: { status_code: status },
+      },
+      url: { path: (req.url ?? '/').split('?')[0] },
+      client: { ip },
+      user_agent: { original: userAgent },
+      'event.duration_ms': Math.round(durationMs * 1000) / 1000,
+    };
+    const level = status >= 500 ? 'error' : status >= 400 ? 'warn' : 'info';
+    logger[level](fields, `${req.method} ${fields.url.path} ${status}`);
+  });
+
+  return requestId;
 }

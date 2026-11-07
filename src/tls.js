@@ -33,7 +33,9 @@ export function tlsOptionsFromEnv(env = process.env, { log = console, cwd = proc
     if (explicit) {
       log.warn?.(`CẢNH BÁO: HTTPS bị tắt vì không tìm thấy chứng chỉ:\n  ${missing.join('\n  ')}\n${how}`);
     } else {
-      log.log?.(`HTTPS: chưa bật (không có ${path.relative(cwd, certFile)}). ${how}`);
+      // Tương thích cả console (log.log) lẫn logger Pino (log.info).
+      const info = typeof log.info === 'function' ? log.info.bind(log) : log.log?.bind(log);
+      info?.(`HTTPS: chưa bật (không có ${path.relative(cwd, certFile)}). ${how}`);
     }
     return null;
   }

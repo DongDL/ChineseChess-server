@@ -125,13 +125,13 @@ export function createFeedbackRoute(mailer, {
           attachments: attachments.map(({ filename, content, contentType }) => ({ filename, content, contentType })),
         });
       } catch (err) {
-        log.error?.('[feedback] gửi thư góp ý thất bại:', err?.message ?? err);
+        log.error?.({ err }, 'Gửi thư góp ý thất bại');
         throw new AuthError('email_send_failed', 502);
       }
 
       send(res, 200, { ok: true });
     } catch (err) {
-      sendError(send, res, err);
+      sendError(send, res, err, log);
     }
     return true;
   };

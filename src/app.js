@@ -9,7 +9,10 @@ import { MemoryStore } from './stores/memory.js';
 import { createAuthRoutes } from './auth-http.js';
 import { createApiRoutes } from './api-http.js';
 import { createFeedbackRoute } from './feedback-http.js';
-import { makeJsonSender } from './http-util.js';
+import { createDocsRoute } from './docs-http.js';
+import { createZaloVerifyRoute } from './zalo-verify-http.js';
+import { makeJsonSender, logHttpRequest } from './http-util.js';
+import { createLogger } from './logger.js';
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -60,22 +63,34 @@ export function createApp({
   mailer = null, // mailer dùng cho thư góp ý (POST /feedback); null = tắt tính năng
   feedbackTo = '', // địa chỉ nhận thư góp ý; rỗng = tắt tính năng
   appName = 'Cờ tướng online',
+  docsEnabled = true, // phục vụ Swagger UI tại /docs (có thể tắt ở production bằng DOCS_ENABLED=0)
+  publicUrl = '', // URL công khai (nếu có) để nút "Try it out" trên Swagger gọi đúng host
+  zaloVerify = {}, // { verifyFile, verifyCode }: phục vụ file xác thực domain cho Zalo Platform
+  // Logger Pino dùng chung. index.js luôn truyền logger thật; mặc định này (im lặng) chỉ
+  // dùng khi gọi createApp mà không truyền logger — chủ yếu trong test, để output test sạch.
+  logger = createLogger(process.env, { level: 'silent' }),
   gameServerOptions = {}, // ghi đè tuỳ chọn của GameServer (ghép trận, đồng hồ...) — chủ yếu cho test
 } = {}) {
   let gameServer;
-  const authRoutes = createAuthRoutes(authService, oauth, { corsOrigin, trustProxy });
-  const apiRoutes = createApiRoutes(authService, store, { corsOrigin });
+  const authRoutes = createAuthRoutes(authService, oauth, { corsOrigin, trustProxy, log: logger });
+  const apiRoutes = createApiRoutes(authService, store, { corsOrigin, log: logger });
   const feedbackRoute = createFeedbackRoute(mailer, {
-    corsOrigin, feedbackTo, appName, auth: authService,
+    corsOrigin, feedbackTo, appName, auth: authService, log: logger,
   });
+  const docsRoute = createDocsRoute({ appVersion, publicUrl, enabled: docsEnabled });
+  const zaloVerifyRoute = createZaloVerifyRoute(zaloVerify);
   const sendVersion = makeJsonSender(corsOrigin);
 
   // Một bộ định tuyến duy nhất, dùng chung cho cả HTTP và HTTPS.
   const requestHandler = async (req, res) => {
+    // Ghi access log cho mọi yêu cầu HTTP API (gắn x-request-id, log khi phản hồi xong).
+    logHttpRequest(logger, req, res, { trustProxy });
     const url = new URL(req.url ?? '/', 'http://localhost');
     if (await authRoutes(req, res)) return;
     if (await apiRoutes(req, res)) return;
     if (await feedbackRoute(req, res)) return;
+    if (await zaloVerifyRoute(req, res)) return;
+    if (await docsRoute(req, res)) return;
     if (req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, ...gameServer.stats() }));
@@ -105,10 +120,14 @@ export function createApp({
   const httpsServer = httpsOptions ? https.createServer(httpsOptions) : null;
   if (httpsServer) bindEngine(io, httpsServer, requestHandler);
 
+  // Recorder được tạo mặc định với log=console; gắn logger dùng chung nếu nó vẫn đang dùng console.
+  if (recorder && recorder.log === console) recorder.log = logger;
+
   gameServer = new GameServer(io, {
     graceMs,
     authService,
     recorder,
+    log: logger,
     ratingOf: async (userId, variant = 'xiangqi') => (await store.getRating(userId, variant))?.rating ?? null,
     ...(clockLimits ? { clockLimits } : {}),
     ...gameServerOptions,
@@ -118,8 +137,9 @@ export function createApp({
   // Dọn định kỳ: phiên/state/mã hết hạn, và lịch sử đăng nhập quá hạn lưu trữ (có chứa IP nên không giữ vô hạn).
   const maintenance = setInterval(() => {
     const now = Date.now();
-    store.purgeExpired(now).catch((e) => console.error('[maintenance]', e.message));
-    store.purgeAuthEvents(now - authEventRetentionDays * DAY_MS).catch((e) => console.error('[maintenance]', e.message));
+    store.purgeExpired(now).catch((e) => logger.error({ err: e }, 'Lỗi dọn định kỳ (purgeExpired)'));
+    store.purgeAuthEvents(now - authEventRetentionDays * DAY_MS)
+      .catch((e) => logger.error({ err: e }, 'Lỗi dọn định kỳ (purgeAuthEvents)'));
   }, maintenanceMs);
   maintenance.unref?.();
 
@@ -132,6 +152,7 @@ export function createApp({
     oauth,
     recorder,
     store,
+    logger,
     close: async () => {
       clearInterval(maintenance);
       gameServer.dispose();

@@ -98,7 +98,7 @@ function gameDetailFor(g, viewerUserId = null) {
  *
  * Chi tiết ván không lộ id tài khoản, mã phòng, seed hoặc loại thật quân úp ngoài quyền.
  */
-export function createApiRoutes(auth, store, { corsOrigin = '*' } = {}) {
+export function createApiRoutes(auth, store, { corsOrigin = '*', log = console } = {}) {
   const send = makeJsonSender(corsOrigin);
 
   const requireUser = async (req) => {
@@ -183,7 +183,7 @@ export function createApiRoutes(auth, store, { corsOrigin = '*' } = {}) {
         throw new AuthError('not_found', 404);
       }
     } catch (err) {
-      sendError(send, res, err);
+      sendError(send, res, err, log);
     }
     return true;
   };

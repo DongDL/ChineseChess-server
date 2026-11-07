@@ -90,11 +90,15 @@ const app = createApp({
   appName,
   docsEnabled: env.DOCS_ENABLED !== '0',
   publicUrl: env.PUBLIC_URL ?? '',
+  // Xác thực domain Zalo: Zalo có thể yêu cầu NHIỀU đường dẫn cùng lúc (gốc domain + dưới callback).
+  // Mỗi bộ biến (không hậu tố, _2, _3...) là một đường dẫn cần phục vụ. Trong .env, xuống dòng viết
+  // bằng "\n" literal nên chuyển lại thành xuống dòng thật.
   zaloVerify: {
-    verifyFile: env.ZALO_VERIFY_FILE ?? '',
-    // Trong .env, xuống dòng được viết bằng "\n" literal; chuyển lại thành xuống dòng thật.
-    verifyHtml: (env.ZALO_VERIFY_HTML ?? '').replace(/\\n/g, '\n'),
-    verifyCode: env.ZALO_VERIFY_CODE ?? '',
+    entries: ['', '_2', '_3'].map((s) => ({
+      file: env[`ZALO_VERIFY_FILE${s}`] ?? '',
+      html: (env[`ZALO_VERIFY_HTML${s}`] ?? '').replace(/\\n/g, '\n'),
+      code: env[`ZALO_VERIFY_CODE${s}`] ?? '',
+    })),
   },
   logger,
 });

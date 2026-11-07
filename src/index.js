@@ -90,7 +90,12 @@ const app = createApp({
   appName,
   docsEnabled: env.DOCS_ENABLED !== '0',
   publicUrl: env.PUBLIC_URL ?? '',
-  zaloVerify: { verifyFile: env.ZALO_VERIFY_FILE ?? '', verifyCode: env.ZALO_VERIFY_CODE ?? '' },
+  zaloVerify: {
+    verifyFile: env.ZALO_VERIFY_FILE ?? '',
+    // Trong .env, xuống dòng được viết bằng "\n" literal; chuyển lại thành xuống dòng thật.
+    verifyHtml: (env.ZALO_VERIFY_HTML ?? '').replace(/\\n/g, '\n'),
+    verifyCode: env.ZALO_VERIFY_CODE ?? '',
+  },
   logger,
 });
 logger.info(`Thư góp ý: ${mailer && feedbackTo ? `bật (gửi tới ${feedbackTo})` : '(chưa bật)'}`);

@@ -120,7 +120,7 @@ export function createFeedbackRoute(mailer, {
       try {
         await mailer.send({
           to: feedbackTo,
-          subject: `[Chinese Chess Support] ${subject}`,
+          subject: `[Góp ý] ${subject}`,
           text: header + bodyText,
           attachments: attachments.map(({ filename, content, contentType }) => ({ filename, content, contentType })),
         });

@@ -65,7 +65,7 @@ export function createApp({
   appName = 'Cờ tướng online',
   docsEnabled = true, // phục vụ Swagger UI tại /docs (có thể tắt ở production bằng DOCS_ENABLED=0)
   publicUrl = '', // URL công khai (nếu có) để nút "Try it out" trên Swagger gọi đúng host
-  zaloVerify = {}, // { verifyFile, verifyCode }: phục vụ file xác thực domain cho Zalo Platform
+  zaloVerify = {}, // { verifyFile, verifyHtml, verifyCode }: phục vụ file xác thực domain cho Zalo Platform
   // Logger Pino dùng chung. index.js luôn truyền logger thật; mặc định này (im lặng) chỉ
   // dùng khi gọi createApp mà không truyền logger — chủ yếu trong test, để output test sạch.
   logger = createLogger(process.env, { level: 'silent' }),
@@ -86,10 +86,12 @@ export function createApp({
     // Ghi access log cho mọi yêu cầu HTTP API (gắn x-request-id, log khi phản hồi xong).
     logHttpRequest(logger, req, res, { trustProxy });
     const url = new URL(req.url ?? '/', 'http://localhost');
+    // Đặt TRƯỚC authRoutes: đường dẫn xác thực Zalo nằm dưới /auth/oauth/zalo/callback/... nên nếu để
+    // authRoutes chạy trước, nó sẽ nuốt yêu cầu và trả 404 (không khớp route OAuth hợp lệ nào).
+    if (await zaloVerifyRoute(req, res)) return;
     if (await authRoutes(req, res)) return;
     if (await apiRoutes(req, res)) return;
     if (await feedbackRoute(req, res)) return;
-    if (await zaloVerifyRoute(req, res)) return;
     if (await docsRoute(req, res)) return;
     if (req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });

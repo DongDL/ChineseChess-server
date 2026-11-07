@@ -6,37 +6,37 @@
 // đăng nhập Google và đồng ý, rồi in ra refresh token để dán vào .env (GMAIL_REFRESH_TOKEN).
 //
 // CHUẨN BỊ (Google Cloud Console — https://console.cloud.google.com/apis/credentials):
-//   1) Mở OAuth client ID bạn đang dùng để đăng nhập (GOOGLE_CLIENT_ID), loại "Web application".
+//   1) Tạo OAuth client ID RIÊNG cho việc gửi mail (GMAIL_CLIENT_ID), loại "Web application".
+//      KHÔNG dùng chung client đăng nhập Google (GOOGLE_CLIENT_ID) — gửi mail có cấu hình riêng.
 //   2) Thêm vào "Authorized redirect URIs":  http://localhost:4571/oauth2callback
 //      (phải trùng TUYỆT ĐỐI với REDIRECT bên dưới; cổng có thể đổi bằng biến PORT).
 //   3) Bật "Gmail API" cho project:  APIs & Services -> Library -> Gmail API -> Enable.
 //   4) Nếu màn hình đồng ý (OAuth consent screen) ở chế độ "Testing", thêm email Gmail dùng để
 //      gửi thư vào danh sách "Test users" (nếu không sẽ bị chặn khi đồng ý).
 //
-// CHẠY (trong thư mục ChineseChess-server):
-//   # Lấy client id/secret từ .env rồi chạy:
-//   GMAIL_CLIENT_ID=... GMAIL_CLIENT_SECRET=... node scripts/gmail-oauth.js
-//   # Hoặc để script tự đọc GOOGLE_CLIENT_ID/SECRET từ .env:
+// CHẠY (trong thư mục ChineseChess-server) — luôn dùng GMAIL_CLIENT_ID/SECRET, KHÔNG dùng GOOGLE_*:
+//   # Nếu .env đã có GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET:
 //   node --env-file=.env scripts/gmail-oauth.js
+//   # Hoặc truyền trực tiếp (PowerShell):
+//   $env:GMAIL_CLIENT_ID="..."; $env:GMAIL_CLIENT_SECRET="..."; node scripts/gmail-oauth.js
 //
 // Sau khi đồng ý, script in ra refresh token. Dán vào .env:
 //   GMAIL_REFRESH_TOKEN=<token vừa in>
 //   GMAIL_SENDER=<email Gmail vừa đồng ý>   # thường trùng SMTP_USER
-// (GMAIL_CLIENT_ID/SECRET có thể bỏ trống nếu đã có GOOGLE_CLIENT_ID/SECRET.)
 // =============================================================================
 
 import http from 'node:http';
 import { randomBytes } from 'node:crypto';
 
 const env = process.env;
-const CLIENT_ID = env.GMAIL_CLIENT_ID || env.GOOGLE_CLIENT_ID;
-const CLIENT_SECRET = env.GMAIL_CLIENT_SECRET || env.GOOGLE_CLIENT_SECRET;
+const CLIENT_ID = env.GMAIL_CLIENT_ID;
+const CLIENT_SECRET = env.GMAIL_CLIENT_SECRET;
 const PORT = Number(env.OAUTH_HELPER_PORT || 4571);
 const REDIRECT = `http://localhost:${PORT}/oauth2callback`;
 const SCOPE = 'https://www.googleapis.com/auth/gmail.send';
 
 if (!CLIENT_ID || !CLIENT_SECRET) {
-  console.error('Thiếu GMAIL_CLIENT_ID/SECRET (hoặc GOOGLE_CLIENT_ID/SECRET).');
+  console.error('Thiếu GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET (client RIÊNG cho gửi mail, không phải GOOGLE_*).');
   console.error('Chạy:  node --env-file=.env scripts/gmail-oauth.js');
   process.exit(1);
 }

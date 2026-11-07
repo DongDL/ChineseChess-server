@@ -53,9 +53,9 @@ export function createSmtpMailer({
 // ngắn hạn qua https://oauth2.googleapis.com/token, rồi POST thư (dạng MIME, mã base64url) tới
 // https://gmail.googleapis.com/gmail/v1/users/me/messages/send. Toàn bộ qua HTTPS.
 //
-// Cần có: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET (có thể tái dùng GOOGLE_CLIENT_ID/SECRET đã dùng cho
-// đăng nhập), GMAIL_REFRESH_TOKEN với scope "https://www.googleapis.com/auth/gmail.send", và
-// GMAIL_SENDER (địa chỉ Gmail gửi đi, thường trùng tài khoản đã cấp quyền).
+// Cần có: GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET (OAuth client RIÊNG cho việc gửi mail — KHÔNG dùng
+// chung GOOGLE_CLIENT_ID/SECRET vốn dành cho đăng nhập Google), GMAIL_REFRESH_TOKEN với scope
+// "https://www.googleapis.com/auth/gmail.send", và GMAIL_SENDER (địa chỉ Gmail gửi đi).
 //
 // Lấy refresh token: chạy `node scripts/gmail-oauth.js` (hướng dẫn in ngay khi chạy).
 
@@ -216,12 +216,14 @@ export function createConsoleMailer(log = console) {
  */
 export function mailerFromEnv(env = process.env, log = console) {
   // --- 1) Gmail API (ưu tiên vì vượt qua được chặn cổng SMTP của Render free) ---
+  // Dùng OAuth client RIÊNG cho gửi mail (GMAIL_CLIENT_ID/SECRET), tách khỏi GOOGLE_CLIENT_ID/SECRET
+  // vốn chỉ dùng cho đăng nhập Google.
   if (env.GMAIL_REFRESH_TOKEN) {
-    const clientId = env.GMAIL_CLIENT_ID || env.GOOGLE_CLIENT_ID;
-    const clientSecret = env.GMAIL_CLIENT_SECRET || env.GOOGLE_CLIENT_SECRET;
+    const clientId = env.GMAIL_CLIENT_ID;
+    const clientSecret = env.GMAIL_CLIENT_SECRET;
     const sender = env.GMAIL_SENDER || env.SMTP_USER;
     if (!clientId || !clientSecret) {
-      log.warn?.('[mail] có GMAIL_REFRESH_TOKEN nhưng thiếu GMAIL_CLIENT_ID/SECRET (hoặc GOOGLE_CLIENT_ID/SECRET): bỏ qua Gmail API.');
+      log.warn?.('[mail] có GMAIL_REFRESH_TOKEN nhưng thiếu GMAIL_CLIENT_ID/GMAIL_CLIENT_SECRET: bỏ qua Gmail API.');
     } else {
       log.info?.('[mail] dùng Gmail API (HTTPS) để gửi thư — không bị chặn cổng SMTP.');
       return createGmailApiMailer({

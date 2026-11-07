@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createApp } from './app.js';
 import { AuthService } from './auth.js';
 import { OAuthService } from './oauth.js';
@@ -10,6 +11,14 @@ import { tlsOptionsFromEnv } from './tls.js';
 const env = process.env;
 const port = Number(env.PORT ?? 3000);
 const httpsPort = Number(env.HTTPS_PORT ?? 3443);
+// Phiên bản server lấy từ package.json để trả về ở GET /version.
+let appVersion = '1.0.0';
+try {
+  const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  appVersion = pkg.version ?? appVersion;
+} catch (err) {
+  console.warn('Không đọc được phiên bản từ package.json:', err.message);
+}
 // ---- Kho lưu trữ: PostgreSQL nếu có DATABASE_URL, không thì lưu tạm trong bộ nhớ ----
 let store;
 if (env.DATABASE_URL) {
@@ -56,16 +65,29 @@ console.log(`Đăng nhập mạng xã hội: ${providers.size ? [...providers.ke
 // ---- HTTPS: chỉ bật khi có chứng chỉ TLS (trên Railway/Render thì nền tảng lo TLS, server chỉ cần HTTP) ----
 const httpsOptions = tlsOptionsFromEnv(env);
 
+// Thư góp ý (POST /feedback) gửi tới hộp thư quản trị. Mặc định dùng chính SMTP_USER; có thể
+// đặt FEEDBACK_TO để chuyển hướng sang hộp thư khác. Thiếu mailer (chưa cấu hình SMTP) -> tính năng tắt.
+const feedbackTo = env.FEEDBACK_TO?.trim() || env.SMTP_USER?.trim() || '';
+const appName = env.APP_NAME ?? 'Cờ tướng online';
+if (mailer && !feedbackTo) {
+  console.warn('CẢNH BÁO: có SMTP nhưng thiếu FEEDBACK_TO/SMTP_USER nên thư góp ý sẽ bị TẮT.');
+}
+
 const app = createApp({
   corsOrigin: env.CORS_ORIGIN ?? '*',
   graceMs: Number(env.RECONNECT_GRACE_MS ?? 60_000),
   trustProxy: env.TRUST_PROXY === '1',
+  appVersion,
   authEventRetentionDays: Number(env.AUTH_EVENT_RETENTION_DAYS ?? 180),
   httpsOptions,
   store,
   authService,
   oauth,
+  mailer,
+  feedbackTo,
+  appName,
 });
+console.log(`Thư góp ý: ${mailer && feedbackTo ? `bật (gửi tới ${feedbackTo})` : '(chưa bật)'}`);
 
 // 0.0.0.0 để truy cập được từ điện thoại thật, emulator Android (10.0.2.2) và trong Docker.
 app.httpServer.listen(port, '0.0.0.0', () => {

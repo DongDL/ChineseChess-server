@@ -8,6 +8,8 @@ import { GameRecorder } from './recorder.js';
 import { MemoryStore } from './stores/memory.js';
 import { createAuthRoutes } from './auth-http.js';
 import { createApiRoutes } from './api-http.js';
+import { createFeedbackRoute } from './feedback-http.js';
+import { makeJsonSender } from './http-util.js';
 
 const DAY_MS = 24 * 60 * 60_000;
 
@@ -47,6 +49,7 @@ export function createApp({
   graceMs = 60_000,
   clockLimits,
   trustProxy = false,
+  appVersion = '1.0.0',
   httpsOptions = null,
   store = new MemoryStore(),
   authService = new AuthService({ store }),
@@ -54,19 +57,35 @@ export function createApp({
   recorder = new GameRecorder(store),
   authEventRetentionDays = 180,
   maintenanceMs = 60 * 60_000,
+  mailer = null, // mailer dùng cho thư góp ý (POST /feedback); null = tắt tính năng
+  feedbackTo = '', // địa chỉ nhận thư góp ý; rỗng = tắt tính năng
+  appName = 'Cờ tướng online',
   gameServerOptions = {}, // ghi đè tuỳ chọn của GameServer (ghép trận, đồng hồ...) — chủ yếu cho test
 } = {}) {
   let gameServer;
   const authRoutes = createAuthRoutes(authService, oauth, { corsOrigin, trustProxy });
   const apiRoutes = createApiRoutes(authService, store, { corsOrigin });
+  const feedbackRoute = createFeedbackRoute(mailer, {
+    corsOrigin, feedbackTo, appName, auth: authService,
+  });
+  const sendVersion = makeJsonSender(corsOrigin);
 
   // Một bộ định tuyến duy nhất, dùng chung cho cả HTTP và HTTPS.
   const requestHandler = async (req, res) => {
+    const url = new URL(req.url ?? '/', 'http://localhost');
     if (await authRoutes(req, res)) return;
     if (await apiRoutes(req, res)) return;
+    if (await feedbackRoute(req, res)) return;
     if (req.url === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ ok: true, ...gameServer.stats() }));
+      return;
+    }
+    // Phiên bản server, công khai (client dùng cho popup "Giới thiệu").
+    // Dùng chung bộ gửi JSON có đủ tiêu đề CORS + xử lý preflight OPTIONS cho bản web.
+    if (url.pathname === '/version') {
+      if (req.method === 'OPTIONS') sendVersion(res, 204, {});
+      else sendVersion(res, 200, { ok: true, version: appVersion });
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });

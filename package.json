@@ -1,6 +1,6 @@
 {
   "name": "xiangqi-server",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Server cờ tướng online (Node.js + Socket.IO). Server làm trọng tài: kiểm tra mọi nước đi bằng engine luật riêng.",
   "type": "module",
   "main": "src/index.js",
@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "node --env-file=.env src/index.js",
+    "start:prod": "node src/index.js",
     "dev": "node --env-file=.env --watch src/index.js",
     "migrate": "node --env-file=.env scripts/migrate.js",
     "test": "node --test",

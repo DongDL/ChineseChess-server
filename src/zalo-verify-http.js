@@ -11,7 +11,8 @@
  *   - file : đường dẫn cần phục vụ (gồm cả path con), KHỚP TỪNG KÝ TỰ với URL Zalo đưa.
  *   - html : (ưu tiên) nội dung trả về y hệt Zalo cấp (có thể là cả trang HTML, hoặc chuỗi text thuần).
  *   - code : (dự phòng) chỉ mã; khi thiếu html, server tự dựng trang HTML tối thiểu có thẻ meta.
- *   - type : (tuỳ chọn) content-type, mặc định 'text/html'. Dùng 'text/plain' cho đường dẫn mà Zalo
+ *   - type : (tuỳ chọn) content-type, mặc định 'text/html'. Chấp nhận MIME đầy đủ ('text/html',
+ *            'text/plain') hoặc viết tắt ('html', 'plain', 'txt'). Dùng kiểu text cho đường dẫn mà Zalo
  *            chỉ cần chuỗi "zalo-platform-site-verification=<mã>".
  *
  * Vì không chỉnh được DNS/subdomain, ta phục vụ các file này trực tiếp từ server. Tất cả nằm trong
@@ -29,6 +30,17 @@ export function createZaloVerifyRoute(config = {}) {
     + `<meta property="zalo-platform-site-verification" content="${code}" />`
     + `</head><body></body></html>`;
 
+  // Chuẩn hoá content-type: chấp nhận viết tắt phổ biến để tránh nhầm (vd đặt "html" thay vì "text/html"
+  // sẽ sinh ra header sai khiến trình duyệt hiển thị HTML dưới dạng text thuần). Giá trị đã có dấu "/"
+  // được coi là MIME đầy đủ và giữ nguyên; rỗng -> mặc định text/html.
+  const mimeOf = (type) => {
+    const t = String(type ?? '').trim().toLowerCase();
+    if (!t) return 'text/html';
+    if (t.includes('/')) return t; // đã là MIME đầy đủ, vd text/html, text/plain
+    const alias = { html: 'text/html', htm: 'text/html', text: 'text/plain', plain: 'text/plain', txt: 'text/plain' };
+    return alias[t] ?? 'text/html';
+  };
+
   // path -> { body, type }. Bỏ qua mục thiếu đường dẫn hoặc thiếu cả html/code.
   // Zalo yêu cầu KHÁC nhau tuỳ đường dẫn: có nơi cần cả trang HTML, có nơi chỉ cần chuỗi text thuần
   // "zalo-platform-site-verification=<mã>". `type` cho phép đặt content-type phù hợp (mặc định text/html).
@@ -39,7 +51,7 @@ export function createZaloVerifyRoute(config = {}) {
     const path = file.startsWith('/') ? file : `/${file}`;
     const body = e.html ? e.html : e.code ? minimalHtml(e.code) : '';
     if (!body) continue;
-    byPath.set(path, { body, type: e.type || 'text/html' });
+    byPath.set(path, { body, type: mimeOf(e.type) });
   }
 
   return async function handle(req, res) {

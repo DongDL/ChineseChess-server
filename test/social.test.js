@@ -91,21 +91,34 @@ describe('Ghép trận theo Elo, khán giả và chat', () => {
       await noEvent(a, 'match:found');
     });
 
-    test('khách ghép với khách ngay; khách với tài khoản chỉ sau khi chờ đủ lâu', async () => {
+    test('khách có điểm Elo (1500) nên ghép như tài khoản: khách-khách và khách-tài khoản đều theo Elo', async () => {
+      // Khách cũng có điểm (mặc định 1500, do client lưu tại máy và gửi lên), nên ghép theo Elo như tài khoản.
       const g1 = await guest(1);
       const g2 = await guest(2);
       await queue(g1);
-      assert.equal((await queue(g2)).matched, true);
+      assert.equal((await queue(g2)).matched, true); // hai khách 1500 ghép ngay
 
+      // Khách 1500 gặp tài khoản 1500: chênh 0, ghép ngay (không còn phải chờ guestAfterMs).
       const acc = await account(1500);
       const g3 = await guest(3);
       await queue(acc);
-      assert.equal((await queue(g3)).matched, false);
-      app.gameServer.matchTick();
-      await noEvent(g3, 'match:found');
-      clock.advance(31_000);
-      app.gameServer.matchTick();
+      assert.equal((await queue(g3)).matched, true);
       await Promise.all([waitFor(acc, 'match:found'), waitFor(g3, 'match:found')]);
+    });
+
+    test('điểm Elo khách do client gửi được dùng để ghép trận; chênh lớn thì chưa ghép', async () => {
+      // Khách tự báo điểm cao (1900) sẽ KHÔNG ghép ngay với tài khoản 1500 (chênh 400 > cửa sổ ban đầu).
+      const acc = await account(1500);
+      const strongGuest = await connectWith(
+        base, { playerId: `khach-manh-${++seq}-xxxxxxxx`, name: 'KhachManh', rating: 1900 }, clients,
+      );
+      await queue(acc);
+      assert.equal((await queue(strongGuest)).matched, false);
+      app.gameServer.matchTick();
+      await noEvent(strongGuest, 'match:found');
+      clock.advance(31_000); // cửa sổ nới dần rồi mới ghép
+      app.gameServer.matchTick();
+      await Promise.all([waitFor(acc, 'match:found'), waitFor(strongGuest, 'match:found')]);
     });
 
     test('người đã ngắt kết nối bị bỏ khỏi hàng đợi, không bị ghép "ma"', async () => {

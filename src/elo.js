@@ -14,6 +14,19 @@ export const PROVISIONAL_GAMES = 30;
 export const RATED_MIN_MOVES = 6;
 export const RATING_VARIANTS = Object.freeze(['xiangqi', 'jieqi']);
 
+/**
+ * Cờ BẬT/TẮT luật "tính điểm cho ván tài khoản đấu KHÁCH".
+ *
+ * - TẮT (mặc định): giữ luật gốc — chỉ ván giữa HAI tài khoản mới tính điểm (an toàn cho bảng xếp hạng,
+ *   vì điểm khách do client tự khai nên không đáng tin).
+ * - BẬT: ván có ÍT NHẤT một tài khoản cũng được tính. Khi đó tài khoản được cộng/trừ điểm (lưu server,
+ *   lên bảng xếp hạng) dựa trên điểm đối thủ khách (do client gửi lúc kết nối). Khách tự tính tại máy.
+ *   ⚠ Cân nhắc gian lận: đối thủ khách có thể khai điểm tuỳ ý để bơm/dìm điểm tài khoản.
+ *
+ * Bật bằng biến môi trường `RATE_VS_GUEST=1` (xem src/index.js).
+ */
+export const RATE_VS_GUEST_DEFAULT = false;
+
 /** Chuẩn hoá biến thể của một thang Elo; mặc định giữ tương thích Xiangqi. */
 export function normalizeRatingVariant(value = 'xiangqi') {
   if (!RATING_VARIANTS.includes(value)) throw new RangeError('bad_variant');
@@ -32,14 +45,25 @@ export function expectedScore(a, b) {
 
 /**
  * Ván có tính điểm không? [g] dạng phẳng: { redUserId, blackUserId, redGuest, blackGuest, moveCount }.
+ *
+ * [opts.rateVsGuest] (mặc định [RATE_VS_GUEST_DEFAULT]): BẬT thì chỉ cần ÍT NHẤT một bên là tài khoản
+ * (bên kia có thể là khách); TẮT thì giữ luật gốc là CẢ HAI phải là tài khoản.
  */
-export function isRatedGame(g, minMoves = RATED_MIN_MOVES) {
-  return Boolean(
-    g.redUserId && g.blackUserId
-    && g.redUserId !== g.blackUserId
-    && !g.redGuest && !g.blackGuest
-    && g.moveCount >= minMoves,
+export function isRatedGame(g, minMoves = RATED_MIN_MOVES, { rateVsGuest = RATE_VS_GUEST_DEFAULT } = {}) {
+  if (g.moveCount < minMoves) return false;
+  // Luật gốc (flag TẮT): CẢ HAI bên là tài khoản, hai tài khoản khác nhau.
+  const bothAccounts = Boolean(
+    g.redUserId && g.blackUserId && g.redUserId !== g.blackUserId && !g.redGuest && !g.blackGuest,
   );
+  if (!rateVsGuest) return bothAccounts;
+  // Flag BẬT: ván có ÍT NHẤT một tài khoản; bên còn lại là tài khoản (khác) hoặc khách.
+  const accountIds = [g.redUserId, g.blackUserId].filter(Boolean);
+  if (accountIds.length === 0) return false; // hai khách: server không tính (khách tự tính tại máy)
+  if (accountIds.length === 2) return bothAccounts; // hai tài khoản: vẫn phải khác nhau
+  // Đúng một tài khoản: bên kia phải là khách (không phải tài khoản "thiếu id" do dữ liệu hỏng).
+  const redIsGuestSide = !g.redUserId && g.redGuest;
+  const blackIsGuestSide = !g.blackUserId && g.blackGuest;
+  return redIsGuestSide || blackIsGuestSide;
 }
 
 /**

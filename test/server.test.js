@@ -174,6 +174,35 @@ test('đầu hàng: đối thủ thắng, cả hai nhận game:over', async () =
   assert.equal(r.error, 'not_playing');
 });
 
+test('game:over kèm điểm Elo lúc vào ván của hai bên (để khách tự tính điểm tại máy)', async () => {
+  // Khách không gửi điểm -> mặc định 1500; khách gửi điểm -> server dùng đúng điểm đó.
+  const a = await connectWith({ playerId: 'guest-rate-A-0001', name: 'KhachA' });
+  const b = await connectWith({ playerId: 'guest-rate-B-0001', name: 'KhachB', rating: 1620 });
+  await startRoom(a, b);
+  const overA = waitFor(a, 'game:over');
+  const overB = waitFor(b, 'game:over');
+  assert.equal((await emit(a, 'game:resign')).ok, true);
+  const [oa, ob] = await Promise.all([overA, overB]);
+  assert.deepEqual(oa.ratings, ob.ratings);
+  // Ai là đỏ/đen do server random; kiểm theo giá trị điểm đã gửi.
+  const seats = [oa.ratings.red, oa.ratings.black];
+  const ratings = seats.map((s) => s.rating).sort((x, y) => x - y);
+  assert.deepEqual(ratings, [1500, 1620]);
+  assert.equal(seats.every((s) => s.guest === true), true);
+});
+
+test('điểm Elo khách không hợp lệ rơi về 1500 trong game:over', async () => {
+  const a = await connectWith({ playerId: 'guest-bad-A-0001', name: 'KhachA', rating: 'rác' });
+  const b = await connectWith({ playerId: 'guest-bad-B-0001', name: 'KhachB', rating: 999999 });
+  await startRoom(a, b);
+  const overA = waitFor(a, 'game:over');
+  assert.equal((await emit(a, 'game:resign')).ok, true);
+  const oa = await overA;
+  // 'rác' -> 1500; 999999 bị kẹp xuống 4000.
+  const ratings = [oa.ratings.red.rating, oa.ratings.black.rating].sort((x, y) => x - y);
+  assert.deepEqual(ratings, [1500, 4000]);
+});
+
 test('xin hoà: từ chối rồi chấp nhận', async () => {
   const a = await connect('player-A-005');
   const b = await connect('player-B-005');

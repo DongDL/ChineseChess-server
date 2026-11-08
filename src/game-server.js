@@ -44,6 +44,25 @@ function cleanName(name, fallback) {
 }
 
 /**
+ * Điểm Elo khách do client tự lưu và gửi lên (chế độ khách). Server KHÔNG lưu điểm khách vào CSDL —
+ * chỉ dùng để ghép trận theo Elo và để báo lại điểm đối thủ lúc kết thúc ván, giúp client tự tính/lưu
+ * điểm tại máy. Giá trị không hợp lệ (thiếu, sai kiểu, ngoài khoảng) rơi về [DEFAULT_RATING].
+ */
+function cleanGuestRating(value) {
+  if (!Number.isFinite(value)) return DEFAULT_RATING;
+  const r = Math.round(value);
+  return Math.min(4000, Math.max(100, r));
+}
+
+/**
+ * Điểm Elo gắn vào ghế khi tạo/vào phòng bằng mã (không qua ghép trận). Chỉ KHÁCH cần điểm này để
+ * tự tính điểm tại máy khi ván kết thúc; tài khoản được server tính điểm riêng nên để null.
+ */
+function seatRating(data) {
+  return data.guest ? (data.guestRating ?? DEFAULT_RATING) : null;
+}
+
+/**
  * Làm sạch tin chat: bỏ ký tự điều khiển (kể cả xuống dòng) và ký tự đảo chiều chữ (U+202A-202E, U+2066-2069, dùng để
  * giả mạo nội dung), gộp khoảng trắng. Server KHÔNG escape HTML: client web phải tự escape khi hiển thị.
  */
@@ -117,6 +136,8 @@ export class GameServer {
           playerId: auth.playerId,
           name: cleanName(auth.name, guestName(auth.playerId)),
           guest: true,
+          // Điểm khách do client gửi (được lưu tại máy). Chỉ dùng để ghép trận và báo lại điểm đối thủ.
+          guestRating: cleanGuestRating(auth.rating),
         });
         return next();
       } catch (err) {
@@ -335,7 +356,7 @@ export class GameServer {
       // Seed do crypto của server sinh; client không bao giờ được quyền cung cấp.
       seed: variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
     });
-    room.seat(side, playerId, name, guest, userId);
+    room.seat(side, playerId, name, guest, userId, seatRating(socket.data));
     this.rooms.set(room.id, room);
     this.playerRoom.set(playerId, room.id);
     socket.join(room.id);
@@ -362,7 +383,7 @@ export class GameServer {
     this.stopSpectating(playerId);
 
     const [side] = room.freeSides();
-    room.seat(side, playerId, name, guest, userId);
+    room.seat(side, playerId, name, guest, userId, seatRating(socket.data));
     this.playerRoom.set(playerId, room.id);
     socket.join(room.id);
     room.status = 'playing';
@@ -393,15 +414,14 @@ export class GameServer {
       const key = `${variant}:${timeControlKey(timeControl)}`;
       this.removeFromQueue(playerId);
 
-      let rating = null;
-      if (!guest) {
-        rating = DEFAULT_RATING;
-        if (userId && this.ratingOf) {
-          try {
-            rating = (await this.ratingOf(userId, variant)) ?? DEFAULT_RATING;
-          } catch (err) {
-            this.log.error({ err, userId, variant }, 'Không đọc được Elo, dùng điểm mặc định');
-          }
+      // Khách cũng có điểm Elo (do client lưu tại máy, gửi lên khi kết nối) để ghép trận theo Elo
+      // và cộng/trừ điểm y như tài khoản. Server KHÔNG lưu điểm khách, chỉ dùng trong phiên này.
+      let rating = guest ? (socket.data.guestRating ?? DEFAULT_RATING) : DEFAULT_RATING;
+      if (!guest && userId && this.ratingOf) {
+        try {
+          rating = (await this.ratingOf(userId, variant)) ?? DEFAULT_RATING;
+        } catch (err) {
+          this.log.error({ err, userId, variant }, 'Không đọc được Elo, dùng điểm mặc định');
         }
       }
       if (this.sockets.get(playerId) !== socket) return undefined;
@@ -474,9 +494,10 @@ export class GameServer {
       seed: entry.variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
     });
     const socks = [this.sockets.get(entry.playerId), this.sockets.get(best.other.playerId)];
+    const byId = new Map([[entry.playerId, entry.rating], [best.other.playerId, best.other.rating]]);
     const [first, second] = randomInt(2) === 0 ? socks : [socks[1], socks[0]];
-    room.seat(SIDE.RED, first.data.playerId, first.data.name, first.data.guest, first.data.userId);
-    room.seat(SIDE.BLACK, second.data.playerId, second.data.name, second.data.guest, second.data.userId);
+    room.seat(SIDE.RED, first.data.playerId, first.data.name, first.data.guest, first.data.userId, byId.get(first.data.playerId));
+    room.seat(SIDE.BLACK, second.data.playerId, second.data.name, second.data.guest, second.data.userId, byId.get(second.data.playerId));
     this.rooms.set(room.id, room);
     for (const s of [first, second]) {
       this.playerRoom.set(s.data.playerId, room.id);
@@ -794,6 +815,12 @@ export class GameServer {
       result: room.game.result,
       reason: room.game.endReason,
       clock: room.clock ? room.clock.snapshot() : null,
+      // Điểm Elo (lúc vào ván) của hai bên, kèm cờ guest. Dùng cho khách TỰ tính/lưu điểm tại máy:
+      // server không tính điểm cho khách nhưng vẫn báo điểm đối thủ để client cộng/trừ y như tài khoản.
+      ratings: {
+        red: room.seats.red ? { rating: room.seats.red.rating, guest: room.seats.red.guest } : null,
+        black: room.seats.black ? { rating: room.seats.black.rating, guest: room.seats.black.guest } : null,
+      },
     };
     if (room.variant === VARIANT.JIEQI) {
       // Kết thúc ván không giải mật seed, bàn đầy đủ hay quân úp đã bị ăn.

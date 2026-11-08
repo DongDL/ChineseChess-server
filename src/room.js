@@ -52,7 +52,9 @@ export class Room {
   sideOf(playerId) { return SIDES.find((s) => this.seats[s]?.playerId === playerId) ?? null; }
   get isFull() { return this.seats.red !== null && this.seats.black !== null; }
   freeSides() { return SIDES.filter((s) => this.seats[s] === null); }
-  seat(side, playerId, name, guest = true, userId = null) { this.seats[side] = { playerId, name, guest, userId, connected: true }; }
+  seat(side, playerId, name, guest = true, userId = null, rating = null) {
+    this.seats[side] = { playerId, name, guest, userId, rating, connected: true };
+  }
   opponentOf(side) { return opposite(side); }
 
   /** Nước đi live/history được dựng riêng theo viewer để không lộ quân úp bị ăn. */
@@ -106,7 +108,9 @@ export class Room {
 
   toRecord() {
     const g = this.game;
-    const seat = (s) => ({ userId: s.userId ?? null, name: s.name, guest: s.guest });
+    const seat = (s) => ({
+      userId: s.userId ?? null, name: s.name, guest: s.guest, rating: s.rating ?? null,
+    });
     const snap = this.clock ? this.clock.snapshot() : null;
     return {
       id: this.gameId,

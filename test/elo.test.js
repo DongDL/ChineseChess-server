@@ -209,6 +209,55 @@ for (const [name, make, skip] of impls) {
   });
 }
 
+describe('Cờ RATE_VS_GUEST: tài khoản đấu khách (MemoryStore)', () => {
+  test('TẮT (mặc định): ván tài khoản-với-khách KHÔNG tính điểm', async () => {
+    const s = new MemoryStore(); // rateVsGuest mặc định false
+    const a = await mkUser(s, 'off_a');
+    const g = mkGame(a, null, { result: 'red' }); // a (đỏ) thắng khách (đen)
+    const res = await s.saveGame(g);
+    assert.equal(res.rating, null);
+    assert.equal((await s.getRating(a.id)).rating, 1500);
+    await s.close();
+  });
+
+  test('BẬT: tài khoản được cộng/trừ điểm dựa trên điểm khách; khách KHÔNG lưu server', async () => {
+    const s = new MemoryStore({ rateVsGuest: true });
+    const a = await mkUser(s, 'on_a');
+    // Tài khoản (đỏ) thắng khách (đen) điểm 1500 -> +20.
+    const win = mkGame(a, null, {
+      result: 'red',
+      red: { userId: a.id, name: a.displayName, guest: false },
+      black: { userId: null, name: 'Khách', guest: true, rating: 1500 },
+    });
+    const r = await s.saveGame(win);
+    assert.equal(r.inserted, true);
+    assert.deepEqual(r.rating.red, { before: 1500, after: 1520, delta: 20 });
+    assert.deepEqual(r.rating.black, { before: 1500, after: 1480, delta: -20 }); // chỉ để báo cho khách
+    assert.equal((await s.getRating(a.id)).rating, 1520); // tài khoản được lưu +20
+
+    // Khách không có danh tính server nên không có dòng điểm nào được tạo cho khách.
+    assert.equal((await s.listLeaderboard()).length, 1);
+
+    // Điểm khách cao (1800) -> tài khoản thắng được ÍT hơn.
+    const b = await mkUser(s, 'on_b');
+    const vsStrong = mkGame(b, null, {
+      result: 'red',
+      red: { userId: b.id, name: b.displayName, guest: false },
+      black: { userId: null, name: 'KhStrong', guest: true, rating: 1800 },
+    });
+    const r2 = await s.saveGame(vsStrong);
+    assert.ok(r2.rating.red.delta > 20);
+    await s.close();
+  });
+
+  test('BẬT: hai khách vẫn KHÔNG tính điểm phía server (khách tự tính tại máy)', async () => {
+    const s = new MemoryStore({ rateVsGuest: true });
+    const g = mkGame(null, null, { result: 'red' });
+    assert.equal((await s.saveGame(g)).rating, null);
+    await s.close();
+  });
+});
+
 describe('Elo qua HTTP và Socket.IO (MemoryStore)', () => {
   let app;
   let base;

@@ -8,6 +8,7 @@ import { MemoryStore } from './stores/memory.js';
 import { PgStore } from './stores/pg.js';
 import { tlsOptionsFromEnv } from './tls.js';
 import { createLogger, logFn } from './logger.js';
+import { RATE_VS_GUEST_DEFAULT } from './elo.js';
 
 const env = process.env;
 const logger = createLogger(env);
@@ -22,16 +23,22 @@ try {
   logger.warn({ err }, 'Không đọc được phiên bản từ package.json');
 }
 // ---- Kho lưu trữ: PostgreSQL nếu có DATABASE_URL, không thì lưu tạm trong bộ nhớ ----
+// Cờ bật/tắt luật "tính điểm cho ván tài khoản đấu KHÁCH".
+// - Có đặt RATE_VS_GUEST trong env: '1'/'true' = BẬT, '0'/'false' = TẮT (env luôn ghi đè).
+// - Không đặt: dùng mặc định RATE_VS_GUEST_DEFAULT trong src/elo.js.
+const rateVsGuest = env.RATE_VS_GUEST === undefined || env.RATE_VS_GUEST === ''
+  ? RATE_VS_GUEST_DEFAULT
+  : (env.RATE_VS_GUEST === '1' || env.RATE_VS_GUEST.toLowerCase() === 'true');
 let store;
 if (env.DATABASE_URL) {
-  store = new PgStore({ connectionString: env.DATABASE_URL, log: logger });
+  store = new PgStore({ connectionString: env.DATABASE_URL, rateVsGuest, log: logger });
   if (env.AUTO_MIGRATE !== '0') {
     const applied = await store.migrate({ log: logFn(logger) });
     if (applied.length === 0) logger.info('CSDL PostgreSQL đã ở phiên bản mới nhất.');
   }
   logger.info('Lưu trữ: PostgreSQL');
 } else {
-  store = new MemoryStore();
+  store = new MemoryStore({ rateVsGuest });
   logger.warn('CẢNH BÁO: chưa đặt DATABASE_URL, tài khoản và ván đấu chỉ lưu trong bộ nhớ và MẤT khi tắt server.');
 }
 

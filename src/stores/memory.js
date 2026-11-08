@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import {
-  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame, normalizeRatingVariant,
+  DEFAULT_RATING, RATE_VS_GUEST_DEFAULT, RATED_MIN_MOVES,
+  computeRatings, isRatedGame, normalizeRatingVariant,
 } from '../elo.js';
 
 /**
@@ -9,8 +10,9 @@ import {
  * giống hệt PgStore; bộ test hợp đồng (test/store.test.js) chạy cùng một bộ kiểm tra trên cả hai.
  */
 export class MemoryStore {
-  constructor({ ratedMinMoves = RATED_MIN_MOVES } = {}) {
+  constructor({ ratedMinMoves = RATED_MIN_MOVES, rateVsGuest = RATE_VS_GUEST_DEFAULT } = {}) {
     this.ratedMinMoves = ratedMinMoves;
+    this.rateVsGuest = rateVsGuest;
     this.users = new Map();
     /** `${userId}:${purpose}` -> mã email đang hiệu lực */
     this.emailCodes = new Map(); // id -> user
@@ -336,22 +338,30 @@ export class MemoryStore {
     const red = this.users.get(flat.redUserId);
     const black = this.users.get(flat.blackUserId);
     let rating = null;
-    if (red && black && isRatedGame(flat, this.ratedMinMoves)) {
-      const redState = this._ratingState(red.id, variant);
-      const blackState = this._ratingState(black.id, variant);
+    // Mỗi bên phải "hiện diện": tài khoản tồn tại trong kho, hoặc là khách. Thiếu tài khoản (đã xoá) thì bỏ qua.
+    const redPresent = flat.redUserId ? Boolean(red) : flat.redGuest;
+    const blackPresent = flat.blackUserId ? Boolean(black) : flat.blackGuest;
+    if (redPresent && blackPresent && isRatedGame(flat, this.ratedMinMoves, { rateVsGuest: this.rateVsGuest })) {
+      // Điểm hiện tại: tài khoản lấy từ kho; khách lấy từ điểm ghế (client gửi), mặc định 1500.
+      const redState = red ? this._ratingState(red.id, variant) : null;
+      const blackState = black ? this._ratingState(black.id, variant) : null;
+      const redBefore = redState ? redState.rating : (g.red.rating ?? DEFAULT_RATING);
+      const blackBefore = blackState ? blackState.rating : (g.black.rating ?? DEFAULT_RATING);
       rating = computeRatings(
-        { rating: redState.rating, games: redState.ratedGames },
-        { rating: blackState.rating, games: blackState.ratedGames },
+        { rating: redBefore, games: redState ? redState.ratedGames : 0 },
+        { rating: blackBefore, games: blackState ? blackState.ratedGames : 0 },
         g.result,
       );
-      redState.rating = rating.red.after;
-      redState.ratedGames += 1;
-      blackState.rating = rating.black.after;
-      blackState.ratedGames += 1;
-      // Giữ các field cũ đồng bộ riêng cho Xiangqi.
-      if (variant === 'xiangqi') {
-        red.rating = redState.rating; red.ratedGames = redState.ratedGames;
-        black.rating = blackState.rating; black.ratedGames = blackState.ratedGames;
+      // Chỉ CẬP NHẬT (lưu server) cho bên là TÀI KHOẢN. Khách tự lưu điểm tại máy, server không giữ.
+      if (redState) {
+        redState.rating = rating.red.after;
+        redState.ratedGames += 1;
+        if (variant === 'xiangqi') { red.rating = redState.rating; red.ratedGames = redState.ratedGames; }
+      }
+      if (blackState) {
+        blackState.rating = rating.black.after;
+        blackState.ratedGames += 1;
+        if (variant === 'xiangqi') { black.rating = blackState.rating; black.ratedGames = blackState.ratedGames; }
       }
     }
     this.games.set(g.id, {
@@ -464,6 +474,8 @@ export class MemoryStore {
       Object.assign(g, { rated: false, redRatingBefore: null, redRatingAfter: null, blackRatingBefore: null, blackRatingAfter: null });
       const red = this.users.get(g.redUserId);
       const black = this.users.get(g.blackUserId);
+      // rebuild CHỈ dựng lại ván giữa HAI tài khoản (tất định). Ván đấu khách không dựng lại được vì điểm
+      // khách tiến hoá ở client, không lưu server — bỏ qua để không làm lệch điểm tài khoản. (Giống PgStore.)
       if (!red || !black || !isRatedGame(g, this.ratedMinMoves)) continue;
       const variant = normalizeRatingVariant(g.variant ?? 'xiangqi');
       const rs = this._ratingState(red.id, variant);

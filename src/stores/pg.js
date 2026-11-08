@@ -2,7 +2,8 @@ import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import { migrate } from '../migrate.js';
 import {
-  DEFAULT_RATING, RATED_MIN_MOVES, computeRatings, isRatedGame, normalizeRatingVariant,
+  DEFAULT_RATING, RATE_VS_GUEST_DEFAULT, RATED_MIN_MOVES,
+  computeRatings, isRatedGame, normalizeRatingVariant,
 } from '../elo.js';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -76,9 +77,12 @@ const ratingOfRow = (r) => {
  * Mọi truy vấn dùng tham số ($1, $2, ...) nên không có nguy cơ SQL injection.
  */
 export class PgStore {
-  constructor({ connectionString, pool, ratedMinMoves = RATED_MIN_MOVES, log = console } = {}) {
+  constructor({
+    connectionString, pool, ratedMinMoves = RATED_MIN_MOVES, rateVsGuest = RATE_VS_GUEST_DEFAULT, log = console,
+  } = {}) {
     this.log = log;
     this.ratedMinMoves = ratedMinMoves;
+    this.rateVsGuest = rateVsGuest;
     this.pool = pool ?? new pg.Pool({ connectionString, max: 10 });
     this.pool.on('error', (err) => this.log.error({ err }, 'Lỗi kết nối PostgreSQL nhàn rỗi (idle)'));
   }
@@ -455,23 +459,27 @@ export class PgStore {
         redUserId, blackUserId, redGuest: g.red.guest, blackGuest: g.black.guest, moveCount: g.moves.length,
       };
       let locked = [];
-      if (isRatedGame(flat, this.ratedMinMoves)) {
-        // Khoá user trước để tránh race xoá/FK, rồi tạo và khoá đúng hai dòng rating của biến thể.
+      // Danh sách id tài khoản thực sự tham gia (1 khi đấu khách, 2 khi hai tài khoản).
+      const accountIds = [redUserId, blackUserId].filter(Boolean);
+      const rated = isRatedGame(flat, this.ratedMinMoves, { rateVsGuest: this.rateVsGuest });
+      if (rated && accountIds.length > 0) {
+        // Khoá user trước để tránh race xoá/FK, rồi tạo và khoá đúng các dòng rating của biến thể.
         const users = (await client.query(
           'SELECT id FROM users WHERE id = ANY($1::uuid[]) ORDER BY id FOR UPDATE',
-          [[redUserId, blackUserId]],
+          [accountIds],
         )).rows;
-        if (users.length === 2) {
+        // Chỉ tính điểm khi MỌI tài khoản dự ván còn tồn tại (không bị xoá giữa chừng).
+        if (users.length === accountIds.length) {
           await client.query(
             `INSERT INTO ratings (user_id, variant) SELECT unnest($1::uuid[]), $2
              ON CONFLICT (user_id, variant) DO NOTHING`,
-            [[redUserId, blackUserId], variant],
+            [accountIds, variant],
           );
           locked = (await client.query(
             `SELECT user_id AS id, elo AS rating, games_played AS rated_games
                FROM ratings WHERE user_id = ANY($1::uuid[]) AND variant = $2
                ORDER BY user_id FOR UPDATE`,
-            [[redUserId, blackUserId], variant],
+            [accountIds, variant],
           )).rows;
         }
       }
@@ -497,31 +505,36 @@ export class PgStore {
       }
 
       let rating = null;
-      {
-        const red = locked.find((r) => r.id === redUserId);
-        const black = locked.find((r) => r.id === blackUserId);
-        if (red && black) {
-          rating = computeRatings(
-            { rating: red.rating, games: red.rated_games },
-            { rating: black.rating, games: black.rated_games },
-            g.result,
-          );
-          const upd = `UPDATE ratings SET elo = $3, games_played = games_played + 1
-                       WHERE user_id = $1 AND variant = $2`;
+      // Tính điểm khi đã khoá đủ dòng rating cho MỌI tài khoản dự ván (locked.length === accountIds.length > 0).
+      if (locked.length > 0 && locked.length === accountIds.length) {
+        const redAcc = locked.find((r) => r.id === redUserId);
+        const blackAcc = locked.find((r) => r.id === blackUserId);
+        // Bên khách không có dòng rating: dùng điểm ghế (client gửi) làm điểm đối thủ, mặc định 1500.
+        const redBefore = redAcc ? redAcc.rating : (g.red.rating ?? DEFAULT_RATING);
+        const blackBefore = blackAcc ? blackAcc.rating : (g.black.rating ?? DEFAULT_RATING);
+        rating = computeRatings(
+          { rating: redBefore, games: redAcc ? redAcc.rated_games : 0 },
+          { rating: blackBefore, games: blackAcc ? blackAcc.rated_games : 0 },
+          g.result,
+        );
+        const upd = `UPDATE ratings SET elo = $3, games_played = games_played + 1
+                     WHERE user_id = $1 AND variant = $2`;
+        const legacy = 'UPDATE users SET rating = $2, rated_games = rated_games + 1 WHERE id = $1';
+        // Chỉ CẬP NHẬT cho bên là TÀI KHOẢN. Khách tự lưu điểm tại máy, server không giữ.
+        if (redAcc) {
           await client.query(upd, [redUserId, variant, rating.red.after]);
-          await client.query(upd, [blackUserId, variant, rating.black.after]);
-          // Columns cũ tiếp tục phản chiếu Xiangqi để tương thích công cụ cũ.
-          if (variant === 'xiangqi') {
-            const legacy = 'UPDATE users SET rating = $2, rated_games = rated_games + 1 WHERE id = $1';
-            await client.query(legacy, [redUserId, rating.red.after]);
-            await client.query(legacy, [blackUserId, rating.black.after]);
-          }
-          await client.query(
-            `UPDATE games SET rated = true, red_rating_before = $2, red_rating_after = $3,
-               black_rating_before = $4, black_rating_after = $5 WHERE id = $1`,
-            [g.id, rating.red.before, rating.red.after, rating.black.before, rating.black.after],
-          );
+          if (variant === 'xiangqi') await client.query(legacy, [redUserId, rating.red.after]);
         }
+        if (blackAcc) {
+          await client.query(upd, [blackUserId, variant, rating.black.after]);
+          if (variant === 'xiangqi') await client.query(legacy, [blackUserId, rating.black.after]);
+        }
+        // Ghi điểm trước/sau của CẢ hai bên (kể cả khách) lên bản ghi ván để lịch sử và rebuildRatings dùng được.
+        await client.query(
+          `UPDATE games SET rated = true, red_rating_before = $2, red_rating_after = $3,
+             black_rating_before = $4, black_rating_after = $5 WHERE id = $1`,
+          [g.id, rating.red.before, rating.red.after, rating.black.before, rating.black.after],
+        );
       }
       await client.query('COMMIT');
       return { inserted: true, rating };
@@ -645,7 +658,10 @@ export class PgStore {
           redUserId: g.red_user_id, blackUserId: g.black_user_id,
           redGuest: g.red_guest, blackGuest: g.black_guest, moveCount: g.move_count,
         };
-        if (!userIds.has(g.red_user_id) || !userIds.has(g.black_user_id) || !isRatedGame(flat, this.ratedMinMoves)) continue;
+        // rebuild CHỈ dựng lại ván giữa HAI tài khoản (tất định từ lịch sử). Ván đấu khách không dựng lại được
+        // vì điểm khách tiến hoá ở client, không lưu server — bỏ qua để không làm lệch điểm tài khoản.
+        if (!userIds.has(g.red_user_id) || !userIds.has(g.black_user_id)
+            || !isRatedGame(flat, this.ratedMinMoves)) continue;
         const variant = g.variant ?? 'xiangqi';
         const red = of(g.red_user_id, variant); const black = of(g.black_user_id, variant);
         const r = computeRatings(red, black, g.result);

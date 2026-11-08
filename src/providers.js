@@ -157,6 +157,16 @@ export function facebookProvider({ clientId, clientSecret, apiVersion = 'v24.0',
 
 // --------------------------------------------------------------------------- Zalo
 
+// Zalo báo lỗi KHÔNG qua HTTP status mà qua JSON `{ error, error_name, error_reason }` (error khác 0
+// hoặc là số âm). Rút gọn thành một chuỗi an toàn để log (chỉ chứa mã/tên lỗi nghiệp vụ, không có secret).
+function zaloErrorOf(json) {
+  const code = json?.error;
+  const hasError = code !== undefined && code !== null && code !== 0 && code !== '0';
+  if (!hasError) return null;
+  const name = json.error_name || json.error_reason || json.message || '';
+  return `zalo_error ${code}${name ? ` (${String(name).slice(0, 80)})` : ''}`;
+}
+
 export function zaloProvider({ clientId, clientSecret, urls = {} }) {
   const u = {
     authorize: 'https://oauth.zaloapp.com/v4/permission',
@@ -187,13 +197,17 @@ export function zaloProvider({ clientId, clientSecret, urls = {} }) {
           code_verifier: verifier,
         }),
       });
+      // Zalo trả HTTP 200 kèm { error, error_name } khi code/secret/PKCE sai -> nêu rõ để dễ chẩn đoán.
+      const zErr = zaloErrorOf(json);
+      if (zErr) throw new Error(zErr);
       return requireAccessToken(json);
     },
     async profile(fetchImpl, accessToken) {
       const j = await fetchJson(fetchImpl, withQuery(u.me, { fields: 'id,name,picture' }), {
         headers: { access_token: accessToken },
       });
-      if (j.error) throw new Error('zalo_profile_error');
+      const zErr = zaloErrorOf(j);
+      if (zErr) throw new Error(zErr);
       return {
         id: j.id,
         name: j.name,

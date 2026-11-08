@@ -127,7 +127,11 @@ export class OAuthService {
       });
       profile = await provider.profile(this.fetch, accessToken);
     } catch (err) {
-      this.log.error(`[oauth:${providerId}] lỗi khi trao đổi với nhà cung cấp:`, err.message);
+      // Pino nhận object ở tham số đầu; ghi cả mã nhà cung cấp và thông điệp lỗi để dễ chẩn đoán.
+      this.log.error(
+        { provider: providerId, reason: err.message },
+        `[oauth:${providerId}] lỗi khi trao đổi với nhà cung cấp`,
+      );
       return fail(`provider_error: ${err.message}`.slice(0, 120), 'provider_error');
     }
     if (typeof profile?.id !== 'string' && typeof profile?.id !== 'number') {

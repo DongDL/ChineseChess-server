@@ -65,7 +65,7 @@ export function createApp({
   appName = 'Cờ tướng online',
   docsEnabled = true, // phục vụ Swagger UI tại /docs (có thể tắt ở production bằng DOCS_ENABLED=0)
   publicUrl = '', // URL công khai (nếu có) để nút "Try it out" trên Swagger gọi đúng host
-  zaloVerify = {}, // { entries: [{ file, html, code }] }: phục vụ (các) file xác thực domain cho Zalo Platform
+  zaloVerify = {}, // { file, content, code, type }: phục vụ file xác thực domain cho Zalo Platform
   // Logger Pino dùng chung. index.js luôn truyền logger thật; mặc định này (im lặng) chỉ
   // dùng khi gọi createApp mà không truyền logger — chủ yếu trong test, để output test sạch.
   logger = createLogger(process.env, { level: 'silent' }),

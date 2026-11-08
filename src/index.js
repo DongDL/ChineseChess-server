@@ -90,25 +90,13 @@ const app = createApp({
   appName,
   docsEnabled: env.DOCS_ENABLED !== '0',
   publicUrl: env.PUBLIC_URL ?? '',
-  // Xác thực domain Zalo: Zalo yêu cầu HAI đường dẫn cùng lúc, mỗi cái trả về định dạng khác nhau:
-  //   - gốc domain (ZALO_VERIFY_*)      : chuỗi text thuần "zalo-platform-site-verification=<mã>"
-  //   - dưới callback (ZALO_VERIFY_AUTH_*): cả trang HTML có thẻ meta
+  // Xác thực domain Zalo: phục vụ nội dung Zalo yêu cầu tại đúng đường dẫn Zalo chỉ định.
   // Trong .env, xuống dòng viết bằng "\n" literal nên chuyển lại thành xuống dòng thật.
   zaloVerify: {
-    entries: [
-      {
-        file: env.ZALO_VERIFY_FILE ?? '',
-        html: (env.ZALO_VERIFY_CONTENT ?? '').replace(/\\n/g, '\n'),
-        code: env.ZALO_VERIFY_CODE ?? '',
-        type: env.ZALO_VERIFY_TYPE ?? '',
-      },
-      {
-        file: env.ZALO_VERIFY_AUTH_FILE ?? '',
-        html: (env.ZALO_VERIFY_AUTH_CONTENT ?? '').replace(/\\n/g, '\n'),
-        code: env.ZALO_VERIFY_AUTH_CODE ?? '',
-        type: env.ZALO_VERIFY_AUTH_TYPE ?? '',
-      },
-    ],
+    file: env.ZALO_VERIFY_FILE ?? '',
+    content: (env.ZALO_VERIFY_CONTENT ?? '').replace(/\\n/g, '\n'),
+    code: env.ZALO_VERIFY_CODE ?? '',
+    type: env.ZALO_VERIFY_TYPE ?? '',
   },
   logger,
 });

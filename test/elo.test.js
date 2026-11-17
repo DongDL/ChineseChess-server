@@ -292,6 +292,8 @@ describe('Elo qua HTTP và Socket.IO (MemoryStore)', () => {
     const s2 = await connectWith(base, { token: sessions.hmai.token }, clients);
     const created = await emit(s1, 'room:create', { side: 'red' });
     await emit(s2, 'room:join', { roomId: created.roomId });
+    await emit(s1, 'room:ready');
+    await emit(s2, 'room:ready');
     const R = [P(1, 9), P(2, 7)];
     const B = [P(1, 0), P(2, 2)];
     for (let i = 0; i < 3; i++) {
@@ -330,6 +332,8 @@ describe('Elo qua HTTP và Socket.IO (MemoryStore)', () => {
     const s2 = await connectWith(base, { playerId: 'a1b2c3d4e5f60718a1b2c3d4e5f60718' }, clients);
     const created = await emit(s1, 'room:create', { side: 'red' });
     await emit(s2, 'room:join', { roomId: created.roomId });
+    await emit(s1, 'room:ready');
+    await emit(s2, 'room:ready');
     await emit(s1, 'game:resign');
     const rating = await waitFor(s2, 'game:rating');
     assert.deepEqual(rating, { roomId: created.roomId, gameId: rating.gameId, rated: false, red: null, black: null });

@@ -382,9 +382,9 @@ for (const impl of impls) {
     async function playGame({ a, b, moves = 0, resigner = 'b', timeControl }) {
       const created = await emit(a, 'room:create', { side: 'red', ...(timeControl ? { timeControl } : {}) });
       assert.equal(created.ok, true, JSON.stringify(created));
-      const startA = waitFor(a, 'game:start');
       await emit(b, 'room:join', { roomId: created.roomId });
-      await startA;
+      await emit(a, 'room:ready');
+      await emit(b, 'room:ready');
       
       // Nếu không resigner và có timeControl, phải đi nước đầu để bắt đầu đồng hồ
       const needFirstMove = !resigner && timeControl;

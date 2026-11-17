@@ -85,17 +85,33 @@ function waitFor(s, ev, ms = 3000) {
 
 const emit = (s, ev, payload) => new Promise((resolve) => s.emit(ev, payload, resolve));
 
+/** Chờ trạng thái đã bắt đầu (bỏ qua các trạng thái "đang chờ Sẵn sàng"). */
+async function waitPlaying(s, ev = 'game:start') {
+  for (;;) {
+    const st = await waitFor(s, ev);
+    if (st.status === 'playing') return st;
+  }
+}
+
+/** Hai bên cùng bấm Sẵn sàng; trả về trạng thái bắt đầu ván của từng bên. */
+async function readyBoth(a, b) {
+  assert.equal((await emit(a, 'room:ready')).ok, true);
+  assert.equal((await emit(b, 'room:ready')).ok, true);
+  return Promise.all([waitPlaying(a), waitPlaying(b)]);
+}
+
 /** Tạo phòng bằng `a` (Đỏ), `b` vào phòng; trả về roomId sau khi ván bắt đầu. */
 async function startRoom(a, b, timeControl) {
   const created = await emit(a, 'room:create', { side: 'red', ...(timeControl ? { timeControl } : {}) });
   assert.equal(created.ok, true);
-  const startA = waitFor(a, 'game:start');
-  const startB = waitFor(b, 'game:start');
+  const lobbyA = waitFor(a, 'game:start');
+  const lobbyB = waitFor(b, 'game:start');
   const joined = await emit(b, 'room:join', { roomId: created.roomId });
   assert.equal(joined.ok, true);
   assert.equal(joined.side, 'black');
-  assert.equal(joined.state.status, 'playing'); // ack phản ánh đúng trạng thái đã bắt đầu
-  const [sa, sb] = await Promise.all([startA, startB]);
+  assert.equal(joined.state.status, 'waiting'); // đủ người nhưng chờ cả hai bấm Sẵn sàng
+  await Promise.all([lobbyA, lobbyB]);
+  const [sa, sb] = await readyBoth(a, b);
   assert.equal(sa.you, 'red');
   assert.equal(sb.you, 'black');
   assert.equal(sa.board.length, 32);
@@ -274,9 +290,22 @@ test('ghép trận nhanh: hai người xếp hàng được ghép vào cùng m�
   const startB = waitFor(b, 'game:start');
   const second = await emit(b, 'queue:join');
   assert.equal(second.matched, true);
-  const [fa, sa, sb] = await Promise.all([foundA, startA, startB]);
-  assert.equal(sa.roomId, fa.roomId);
-  assert.equal(sb.roomId, fa.roomId);
+  const [fa, la, lb] = await Promise.all([foundA, startA, startB]);
+  assert.equal(la.roomId, fa.roomId);
+  assert.equal(lb.roomId, fa.roomId);
+  // Ghép xong chưa bắt đầu: chờ cả hai bấm Sẵn sàng rồi mới chọn màu và xếp bàn.
+  assert.equal(la.status, 'waiting');
+  assert.equal(la.sidePending, true);
+  await emit(a, 'room:ready');
+  const half = await waitFor(b, 'game:start'); // B thấy A đã sẵn sàng
+  await waitFor(a, 'game:start');
+  assert.equal(half.status, 'waiting');
+  assert.ok(half.ready.red || half.ready.black);
+  const playA = waitFor(a, 'game:start');
+  const playB = waitFor(b, 'game:start');
+  await emit(b, 'room:ready');
+  const [sa, sb] = await Promise.all([playA, playB]);
+  assert.equal(sa.status, 'playing');
   assert.notEqual(sa.you, sb.you);
 });
 
@@ -310,9 +339,8 @@ test('đồng hồ: Đỏ chạy ngay khi ván bắt đầu, đi xong được c
   assert.equal(created.state.clock.baseMs, 300_000);
   assert.equal(created.state.clock.running, null); // chưa đủ người: đồng hồ chưa chạy
 
-  const startA = waitFor(a, 'game:start');
   await emit(b, 'room:join', { roomId: created.roomId });
-  const start = await startA;
+  const [start] = await readyBoth(a, b);
   // Đồng hồ chưa bắt đầu - chờ nước đi đầu tiên
   assert.equal(start.clock.running, null);
   assert.equal(start.clock.incrementMs, 3_000);
@@ -401,11 +429,9 @@ test('ghép trận nhanh chỉ giữa những người chọn cùng mức thời
   // b chọn mức khác (không giới hạn): không được ghép với a
   assert.equal((await emit(b, 'queue:join', {})).matched, false);
 
-  const startA = waitFor(a, 'game:start');
-  const startC = waitFor(c, 'game:start');
   const r = await emit(c, 'queue:join', { timeControl: tc });
   assert.equal(r.matched, true);
-  const [sa, sc] = await Promise.all([startA, startC]);
+  const [sa, sc] = await readyBoth(a, c);
   assert.equal(sa.roomId, sc.roomId);
   assert.equal(sa.clock.baseMs, 600_000);
   assert.equal(sc.clock.incrementMs, 5_000);
@@ -537,11 +563,10 @@ test('hai chế độ cùng chơi: tài khoản (guest=false) đấu với khác
   const created = await emit(a, 'room:create', { side: 'red' });
   assert.deepEqual(created.state.players.red, { name: 'An Nguyễn', connected: true, guest: false });
 
-  const startA = waitFor(a, 'game:start');
   const joined = await emit(b, 'room:join', { roomId: created.roomId });
   assert.deepEqual(joined.state.players.black, { name: 'Khách Bình', connected: true, guest: true });
   assert.equal(joined.state.players.red.guest, false);
-  await startA;
+  await readyBoth(a, b);
 
   // Không bao giờ lộ id tài khoản hay playerId cho đối thủ
   const raw = JSON.stringify(joined.state);

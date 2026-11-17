@@ -24,8 +24,10 @@ const publicSeat = (seat) => seat ? { name: seat.name, connected: seat.connected
 export const seedCommitment = (seed) => createHash('sha256').update(String(seed), 'utf8').digest('hex');
 
 export class Room {
-  constructor(id, timeControl = null, { variant = VARIANT.XIANGQI, seed = null } = {}) {
+  constructor(id, timeControl = null, { variant = VARIANT.XIANGQI, seed = null, randomSide = false } = {}) {
     this.id = id;
+    this.randomSide = randomSide;
+    this.ready = { red: false, black: false };
     this.gameId = randomUUID();
     this.variant = normalizeVariant(variant);
     this.seed = this.variant === VARIANT.JIEQI ? String(seed) : null;
@@ -56,6 +58,36 @@ export class Room {
     this.seats[side] = { playerId, name, guest, userId, rating, connected: true };
   }
   opponentOf(side) { return opposite(side); }
+
+  /** Phe chỉ được chốt khi ván bắt đầu (cả hai đã sẵn sàng) nếu phòng chọn màu ngẫu nhiên. */
+  get sidePending() { return this.randomSide && this.status === 'waiting'; }
+
+  /** Cả hai ghế đã có người và cả hai đã bấm Sẵn sàng. */
+  get allReady() { return this.isFull && this.ready.red && this.ready.black; }
+
+  resetReady() { this.ready = { red: false, black: false }; }
+
+  /** Đổi chỗ hai người chơi (chọn màu ngẫu nhiên). */
+  swapSeats() {
+    [this.seats.red, this.seats.black] = [this.seats.black, this.seats.red];
+    [this.timers.red, this.timers.black] = [this.timers.black, this.timers.red];
+  }
+
+  /**
+   * Xếp lại bàn cờ khi ván bắt đầu: Cờ Tướng dựng bàn mới, Cờ Úp xáo quân với seed mới
+   * (seed do server sinh, client không được cung cấp). Ván mới có gameId mới.
+   */
+  rearrange(seed = null) {
+    if (this.variant === VARIANT.JIEQI) {
+      if (!/^[0-9a-f]{32}$/.test(String(seed))) throw new RangeError('bad_jieqi_seed');
+      this.seed = String(seed);
+      this.seedHash = seedCommitment(this.seed);
+      this.game = XiangqiGame.jieqiSecure(this.seed);
+    } else {
+      this.game = new XiangqiGame();
+    }
+    this.gameId = randomUUID();
+  }
 
   /** Nước đi live/history được dựng riêng theo viewer để không lộ quân úp bị ăn. */
   moveForViewer(record, viewerSide = null, moveNumber = null) {
@@ -89,6 +121,8 @@ export class Room {
       gameId: this.gameId,
       ...(jieqi ? { variant: this.variant } : {}),
       status: this.status,
+      ready: { red: this.ready.red, black: this.ready.black },
+      sidePending: this.sidePending,
       you: viewerSide,
       players: { red: publicSeat(this.seats.red), black: publicSeat(this.seats.black) },
       turn: g.turn,

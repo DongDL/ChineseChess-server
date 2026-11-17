@@ -20,6 +20,20 @@ after(async () => {
   await app.close();
 });
 
+/** Chờ trạng thái đã bắt đầu ván (bỏ qua các trạng thái chờ Sẵn sàng). */
+const waitPlaying = async (s) => {
+  for (;;) {
+    const st = await waitFor(s, 'jieqi:state');
+    if (st.status === 'playing') return st;
+  }
+};
+
+const readyBoth = async (a, b, extra = []) => {
+  assert.equal((await emit(a, 'jieqi:ready')).ok, true);
+  assert.equal((await emit(b, 'jieqi:ready')).ok, true);
+  return Promise.all([a, b, ...extra].map(waitPlaying));
+};
+
 const assertNoJieqiIndexes = (value) => {
   if (Array.isArray(value)) {
     value.forEach(assertNoJieqiIndexes);
@@ -58,7 +72,9 @@ test('state/move/reconnect/spectator và game_over luôn giữ bí mật', async
   const spectatorStart = waitFor(spectator, 'jieqi:state');
   const joined = await emit(black, 'jieqi:join_room', { roomId: created.roomId });
   assert.equal(joined.ok, true);
-  const starts = await Promise.all([redStart, blackStart, spectatorStart]);
+  const lobby = await Promise.all([redStart, blackStart, spectatorStart]);
+  lobby.forEach((s) => assert.equal(s.status, 'waiting'));
+  const starts = await readyBoth(red, black, [spectator]);
   starts.forEach(assertRedactedBoard);
 
   const outsider = await connect();
@@ -157,12 +173,10 @@ test('matchmaking cô lập Xiangqi và Jieqi', async () => {
   assert.deepEqual(await emit(x, 'queue:join', {}), { ok: true, matched: false });
   assert.deepEqual(await emit(j1, 'jieqi:queue_join', {}), { ok: true, matched: false, variant: 'jieqi' });
   const found = waitFor(j1, 'jieqi:match_found');
-  const state1 = waitFor(j1, 'jieqi:state');
-  const state2 = waitFor(j2, 'jieqi:state');
   const matched = await emit(j2, 'jieqi:queue_join', {});
   assert.equal(matched.matched, true);
   assert.equal((await found).roomId, matched.roomId);
-  const [a, b] = await Promise.all([state1, state2]);
+  const [a, b] = await readyBoth(j1, j2);
   assert.equal(a.variant, 'jieqi');
   assert.equal(b.variant, 'jieqi');
   assert.equal(x.log.some((e) => e.ev === 'match:found'), false);
@@ -195,6 +209,7 @@ test('resign và draw cô lập namespace Xiangqi/Jieqi theo cả hai chiều', 
   const jr = await connect(); const jb = await connect();
   const jieqiCreated = await emit(jr, 'jieqi:create_room', { side: 'red' });
   await emit(jb, 'jieqi:join_room', { roomId: jieqiCreated.roomId });
+  await readyBoth(jr, jb);
   const jieqiRoom = app.gameServer.rooms.get(jieqiCreated.roomId);
 
   assert.equal((await emit(jr, 'game:resign')).error, 'wrong_variant');
@@ -214,6 +229,8 @@ test('resign và draw cô lập namespace Xiangqi/Jieqi theo cả hai chiều', 
   const xr = await connect(); const xb = await connect();
   const xiangqiCreated = await emit(xr, 'room:create', { side: 'red' });
   await emit(xb, 'room:join', { roomId: xiangqiCreated.roomId });
+  await emit(xr, 'room:ready');
+  await emit(xb, 'room:ready');
   const xiangqiRoom = app.gameServer.rooms.get(xiangqiCreated.roomId);
 
   assert.equal((await emit(xr, 'jieqi:resign')).error, 'wrong_variant');

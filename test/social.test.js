@@ -42,6 +42,13 @@ describe('Ghép trận theo Elo, khán giả và chat', () => {
   }
   const guest = (n) => connectWith(base, { playerId: `khach-${n}-${++seq}-xxxxxxxx`, name: `Khach${n}` }, clients);
   const queue = (s, tc = null) => emit(s, 'queue:join', tc ? { timeControl: tc } : {});
+  /** Chờ trạng thái đã bắt đầu ván (bỏ qua các trạng thái chờ Sẵn sàng). */
+  const waitPlaying = async (s, ev = 'game:start') => {
+    for (;;) {
+      const st = await waitFor(s, ev);
+      if (st.status === 'playing') return st;
+    }
+  };
   const noEvent = async (s, ev) => {
     await sleep(60);
     assert.equal(s.log.some((e) => e.ev === ev), false, `không được có sự kiện ${ev}`);
@@ -139,7 +146,9 @@ describe('Ghép trận theo Elo, khán giả và chat', () => {
       const created = await emit(red, 'room:create', { side: 'red' });
       roomId = created.roomId;
       await emit(black, 'room:join', { roomId });
-      await Promise.all([waitFor(red, 'game:start'), waitFor(black, 'game:start')]);
+      await emit(red, 'room:ready');
+      await emit(black, 'room:ready');
+      await Promise.all([waitPlaying(red), waitPlaying(black)]);
     };
 
     test('khán giả có tài khoản xem được, thấy nước đi và chat; người chơi thấy tin của khán giả', async () => {
@@ -175,7 +184,11 @@ describe('Ghép trận theo Elo, khán giả và chat', () => {
       assert.equal(ack.state.status, 'waiting');
       const joiner = await account(1500);
       await emit(joiner, 'room:join', { roomId: created.roomId });
-      const st = await waitFor(fan, 'spectate:state');
+      const lobby = await waitFor(fan, 'spectate:state');
+      assert.equal(lobby.status, 'waiting'); // đủ người nhưng chưa ai bấm Sẵn sàng
+      await emit(host, 'room:ready');
+      await emit(joiner, 'room:ready');
+      const st = await waitPlaying(fan, 'spectate:state');
       assert.equal(st.status, 'playing');
       assert.equal(st.you, null);
       assert.equal(st.board.length, 32);

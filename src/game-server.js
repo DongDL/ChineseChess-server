@@ -250,13 +250,9 @@ export class GameServer {
     on('room:join', (p, reply) => this.joinRoom(socket, p, reply, VARIANT.XIANGQI));
     on('jieqi:create_room', (p, reply) => this.createRoom(socket, p, reply, VARIANT.JIEQI));
     on('jieqi:join_room', (p, reply) => this.joinRoom(socket, p, reply, VARIANT.JIEQI));
-    // Lifecycle hiện tại bắt đầu ngay khi đủ hai ghế; ready là idempotent để client Jieqi xác nhận đã sẵn sàng.
-    on('jieqi:ready', (p, reply) => {
-      const r = this.roomOf(playerId);
-      if (!r || r.variant !== VARIANT.JIEQI) return reply(fail('not_in_jieqi_room'));
-      socket.emit('jieqi:state', r.toState(r.sideOf(playerId)));
-      return reply(ok({ state: r.toState(r.sideOf(playerId)) }));
-    });
+    // Ván chỉ bắt đầu khi đủ hai người và cả hai đã bấm Sẵn sàng.
+    on('room:ready', (p, reply) => this.handleReady(socket, reply, VARIANT.XIANGQI));
+    on('jieqi:ready', (p, reply) => this.handleReady(socket, reply, VARIANT.JIEQI));
     on('room:leave', (p, reply) => this.leaveRoom(socket, reply));
     on('room:spectate', (p, reply) => this.spectate(socket, p, reply, VARIANT.XIANGQI));
     on('jieqi:spectate', (p, reply) => this.spectate(socket, p, reply, VARIANT.JIEQI));
@@ -350,9 +346,11 @@ export class GameServer {
     this.removeFromQueue(playerId);
     this.stopSpectating(playerId);
 
-    const side = payload.side === SIDE.RED || payload.side === SIDE.BLACK ? payload.side : SIDES[randomInt(2)];
+    const randomSide = !(payload.side === SIDE.RED || payload.side === SIDE.BLACK);
+    const side = randomSide ? SIDES[randomInt(2)] : payload.side;
     const room = new Room(generateRoomId((id) => this.rooms.has(id)), timeControl, {
       variant,
+      randomSide,
       // Seed do crypto của server sinh; client không bao giờ được quyền cung cấp.
       seed: variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
     });
@@ -386,9 +384,41 @@ export class GameServer {
     room.seat(side, playerId, name, guest, userId, seatRating(socket.data));
     this.playerRoom.set(playerId, room.id);
     socket.join(room.id);
-    room.status = 'playing';
+    // Đủ hai người nhưng chưa bắt đầu: chờ cả hai bấm Sẵn sàng (xem handleReady).
+    room.resetReady();
     reply(ok({ roomId, side, state: room.toState(side) }));
-    return this.startGame(room);
+    return this.emitState(room);
+  }
+
+  /** Người chơi bấm Sẵn sàng. Đủ cả hai thì chọn màu (nếu ngẫu nhiên), xếp lại bàn và bắt đầu ván. */
+  handleReady(socket, reply, expectedVariant = null) {
+    const { playerId } = socket.data;
+    const room = this.roomOf(playerId);
+    if (!room) return reply(fail('not_in_room'));
+    if (expectedVariant && room.variant !== expectedVariant) return reply(fail('wrong_variant'));
+    if (room.status !== 'waiting') return reply(fail('not_waiting'));
+    if (!room.isFull) return reply(fail('opponent_missing'));
+    const side = room.sideOf(playerId);
+    room.ready[side] = true;
+    if (room.allReady) {
+      reply(ok());
+      return this.startGame(room);
+    }
+    reply(ok({ state: room.toState(side) }));
+    return this.emitState(room);
+  }
+
+  /** Gửi trạng thái phòng cho hai người chơi và khán giả. */
+  emitState(room) {
+    const jieqi = room.variant === VARIANT.JIEQI;
+    const playerEvent = jieqi ? 'jieqi:state' : 'game:start';
+    for (const side of SIDES) {
+      const seat = room.seats[side];
+      if (seat) this.sockets.get(seat.playerId)?.emit(playerEvent, room.toState(side));
+    }
+    for (const pid of room.spectators.keys()) {
+      this.sockets.get(pid)?.emit(jieqi ? 'jieqi:state' : 'spectate:state', room.toState(null));
+    }
   }
 
   /**
@@ -491,6 +521,7 @@ export class GameServer {
 
     const room = new Room(generateRoomId((id) => this.rooms.has(id)), entry.timeControl, {
       variant: entry.variant,
+      randomSide: true,
       seed: entry.variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null,
     });
     const socks = [this.sockets.get(entry.playerId), this.sockets.get(best.other.playerId)];
@@ -512,7 +543,8 @@ export class GameServer {
       const event = room.variant === VARIANT.JIEQI ? 'jieqi:match_found' : 'match:found';
       this.sockets.get(room.seats[side].playerId)?.emit(event, { roomId: room.id, side, variant: room.variant });
     }
-    this.startGame(room);
+    // Chưa bắt đầu ván: chờ cả hai bấm Sẵn sàng.
+    this.emitState(room);
   }
 
   /** Thử ghép lại những người đang chờ (cửa sổ Elo nới dần theo thời gian chờ). Gọi định kỳ. */
@@ -526,16 +558,16 @@ export class GameServer {
   }
 
   startGame(room) {
+    // Cả hai đã sẵn sàng: chọn màu ngẫu nhiên (nếu phòng chọn vậy) rồi xếp lại bàn cờ.
+    if (room.randomSide && randomInt(2) === 1) room.swapSeats();
+    room.rearrange(room.variant === VARIANT.JIEQI ? randomBytes(16).toString('hex') : null);
+    room.resetReady();
     room.status = 'playing';
     room.startedAt = Date.now();
     // KHÔNG bắt đầu đồng hồ ngay - chờ nước đi đầu tiên
     // room.clock?.start(SIDE.RED);
     this.scheduleFlag(room);
-    const playerEvent = room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'game:start';
-    for (const side of SIDES) this.sockets.get(room.seats[side].playerId)?.emit(playerEvent, room.toState(side));
-    for (const pid of room.spectators.keys()) {
-      this.sockets.get(pid)?.emit(room.variant === VARIANT.JIEQI ? 'jieqi:state' : 'spectate:state', room.toState(null));
-    }
+    this.emitState(room);
   }
 
   /** Hẹn giờ phát hiện bên đang chạy hết giờ. Đồng hồ do SERVER tính, không tin client. */
@@ -580,12 +612,19 @@ export class GameServer {
     room.timers[side] = null;
     this.playerRoom.delete(playerId);
     this.sockets.get(playerId)?.leave(room.id);
+    // Chưa bắt đầu: nhả ghế để người khác vào được và huỷ trạng thái sẵn sàng của cả hai.
+    const waiting = room.status === 'waiting';
+    if (waiting) {
+      room.seats[side] = null;
+      room.resetReady();
+    }
 
     const anyoneLeft = SIDES.some((s) => {
       const seat = room.seats[s];
       return seat && this.playerRoom.get(seat.playerId) === room.id;
     });
     if (!anyoneLeft) this.dropRoom(room);
+    else if (waiting) this.emitState(room);
   }
 
   /** Xoá phòng; khán giả còn lại được báo để app đóng màn hình xem. */
